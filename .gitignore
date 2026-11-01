@@ -1,0 +1,46 @@
+# IDE and local Android SDK settings
+.idea/
+*.iml
+local.properties
+.vscode/
+
+# Gradle / Kotlin / native build caches and generated output
+.gradle/
+.kotlin/
+**/build/
+.externalNativeBuild/
+.cxx/
+/captures/
+
+# Installers, bundles, profiler dumps and logs
+*.apk
+*.aab
+*.ap_
+*.hprof
+*.log
+
+# Private signing material and local secrets
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key
+key.properties
+keystore.properties
+signing.properties
+secrets.properties
+.env
+.env.*
+!.env.example
+!.env.*.example
+/secrets/
+
+# Local backups and OS files
+*.bak
+*.tmp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Keep Gradle wrapper scripts, gradle-wrapper.jar, version catalogs and lockfiles.
