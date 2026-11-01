@@ -96,7 +96,7 @@ import org.json.JSONObject
             Button(onClick={login(address,username,password)},enabled=!s.busy&&address.isNotBlank()&&username.isNotBlank()&&password.isNotEmpty(),shape=RoundedCornerShape(14.dp),modifier=Modifier.fillMaxWidth().height(52.dp).testTag("login")){Text(if(!networkAllowed)"允许访问并连接" else if(s.deviceApprovalCode!=null)"已在电脑批准，重新登录" else "连接电脑",fontWeight=FontWeight.Bold)}
         }}
         Text("填写电脑后台提供的地址。登录后会安全保存连接凭据，不需要每次输入密码。外网使用 HTTPS 地址。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary,lineHeight=21.sp)
-        Text("个人使用 · v0.3.0",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
+        Text("个人使用 · v0.3.1",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
     }
 }
 @Composable private fun ChatsScreen(s:ScreenState,vm:BridgeViewModel,newChat:()->Unit,request:(JSONObject)->Unit){
@@ -116,21 +116,28 @@ private fun folder(path:String)=path.trimEnd('\\','/').substringAfterLast('\\').
 @Composable private fun RequestBanner(r:JSONObject,action:()->Unit){Card(onClick=action,colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.tertiaryContainer),modifier=Modifier.fillMaxWidth()){Row(Modifier.padding(16.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(if(r.str("method").endsWith("requestUserInput"))"Codex 需要你回答" else "有一项操作需要授权",fontWeight=FontWeight.SemiBold);Text("查看具体内容后，再决定是否继续",style=MaterialTheme.typography.bodySmall)};Text("查看 ›")}}}
 @Composable private fun Conversation(s:ScreenState,vm:BridgeViewModel,request:(JSONObject)->Unit){
     val list=rememberLazyListState();var follow by remember(s.selected?.id){mutableStateOf(true)}
+    var preview by remember(s.selected?.id,s.session?.address,s.session?.deviceId){mutableStateOf<ImageAttachment?>(null)}
     LaunchedEffect(list.isScrollInProgress){if(list.isScrollInProgress)follow=list.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let{it>=list.layoutInfo.totalItemsCount-2}?:true}
     LaunchedEffect(s.entries.size,s.entries.lastOrNull()?.text){if(follow){withFrameNanos{};if(list.layoutInfo.totalItemsCount>0)list.scrollToItem(list.layoutInfo.totalItemsCount-1)}}
     LazyColumn(state=list,modifier=Modifier.fillMaxSize(),contentPadding=PaddingValues(horizontal=16.dp,vertical=12.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
         if(s.historyCursor.isNotEmpty())item{TextButton(onClick=vm::moreHistory,enabled=!s.busy,modifier=Modifier.fillMaxWidth()){Text("加载更早的消息")}}
         if(s.entries.isEmpty())item{Column(Modifier.fillMaxWidth().padding(vertical=44.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)){Text(">_",fontSize=36.sp,fontFamily=FontFamily.Monospace,color=MaterialTheme.colorScheme.primary);Text("想让电脑做什么？",style=MaterialTheme.typography.titleLarge);Text("发一条消息，或附上一张图片。",color=MaterialTheme.colorScheme.secondary)}}
-        items(s.entries,key=Entry::id){entry->Message(entry)}
+        items(s.entries,key=Entry::id){entry->Message(entry,vm){preview=it}}
         items(s.tasks.filter{it.active||it.state=="needsReview"||it.state=="failed"}.take(8),key={"job:"+it.id}){task->Surface(shape=RoundedCornerShape(14.dp),color=MaterialTheme.colorScheme.surfaceVariant){Row(Modifier.fillMaxWidth().padding(14.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(taskLabel(task.state),fontWeight=FontWeight.Medium);if(task.error.isNotBlank())Text(task.error,style=MaterialTheme.typography.bodySmall)};if(task.active)TextButton(onClick={vm.stop(task)},enabled=!s.busy){Text(if(task.state=="queued")"取消排队" else "停止")}}}}
         items(s.requests.filter{it.str("threadId")==s.selected?.id},key={"req:"+it.str("id")}){r->RequestBanner(r){request(r)}}
         item{Spacer(Modifier.height(4.dp))}
     }
+    preview?.let{ImagePreview(it,vm){preview=null}}
 }
 private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"starting"->"正在启动任务";"running"->"Codex 正在处理";"waitingApproval"->"等待你的确认";"needsReview"->"结果需要检查，请先刷新聊天";"failed"->"任务未完成";else->state}
-@Composable private fun Message(entry:Entry){
+@Composable private fun Message(entry:Entry,vm:BridgeViewModel,openImage:(ImageAttachment)->Unit){
     if(entry.role=="tool"){var expanded by remember(entry.id){mutableStateOf(false)};Surface(shape=RoundedCornerShape(14.dp),color=MaterialTheme.colorScheme.surfaceVariant){Column(Modifier.fillMaxWidth().clickable{expanded=!expanded}.padding(14.dp)){Text((if(expanded)"▾  " else "▸  ")+entry.text,style=MaterialTheme.typography.labelLarge);if(expanded)SelectionContainer{Text(entry.detail.takeLast(60000),fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(top=10.dp))}}};return}
-    val user=entry.role=="user";Column(Modifier.fillMaxWidth(),horizontalAlignment=if(user)Alignment.End else Alignment.Start){Text(if(user)"你" else "CODEX",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary,modifier=Modifier.padding(horizontal=4.dp,vertical=5.dp));Surface(shape=RoundedCornerShape(18.dp),color=if(user)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,modifier=Modifier.widthIn(max=600.dp)){SelectionContainer{Text(entry.text.ifEmpty{if(entry.live)"正在回复…" else " "},Modifier.padding(16.dp),style=MaterialTheme.typography.bodyLarge,lineHeight=25.sp)}}}
+    val user=entry.role=="user";Column(Modifier.fillMaxWidth(),horizontalAlignment=if(user)Alignment.End else Alignment.Start){Text(if(user)"你" else "CODEX",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary,modifier=Modifier.padding(horizontal=4.dp,vertical=5.dp));Surface(shape=RoundedCornerShape(18.dp),color=if(user)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,modifier=Modifier.widthIn(max=600.dp)){
+        Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
+            if(entry.text.isNotEmpty()||entry.images.isEmpty())SelectionContainer{Text(entry.text.ifEmpty{if(entry.live)"正在回复…" else " "},style=MaterialTheme.typography.bodyLarge,lineHeight=25.sp)}
+            entry.images.forEach{photo->HistoryImage(photo,vm){openImage(photo)}}
+        }
+    }}
 }
 @Composable private fun Composer(s:ScreenState,vm:BridgeViewModel,networkAllowed:Boolean,requestNetwork:()->Unit,abandon:()->Unit){
     val picker=rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(8)){if(it.isNotEmpty())vm.addPhotos(it)}
@@ -163,7 +170,7 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
                 }
                 Text("关闭手机应用不会停止电脑任务。重新打开后会自动连接，刷新即可查看结果。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)
                 TextButton(onClick=forget,enabled=!s.busy){Text("移除本机连接信息")}
-                Text("掌上 Codex · 0.3.0",style=MaterialTheme.typography.labelSmall)
+                Text("掌上 Codex · 0.3.1",style=MaterialTheme.typography.labelSmall)
             }
         },
         confirmButton={TextButton(onClick=dismiss){Text("完成")}}

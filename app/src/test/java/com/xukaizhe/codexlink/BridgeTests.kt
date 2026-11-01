@@ -25,7 +25,7 @@ class BridgeTests {
     @Test fun historyIsChronologicalAndDoesNotRenderReasoningOrTrustStoredStatus(){
         val history=JSONObject("""{"turns":[{"id":"t2","status":"completed","items":[{"id":"u2","type":"userMessage","content":[{"type":"localImage","attachment":true}]},{"id":"r2","type":"reasoning","text":"private"},{"id":"a2","type":"agentMessage","text":"second"}]},{"id":"t1","items":[{"id":"a1","type":"agentMessage","text":"first"}]}]}""")
         val entries=BridgeCodec.history(history)
-        assertEquals(listOf("first","[图片附件]","second"),entries.map{it.text});assertFalse(entries.any{it.text.contains("private")});assertFalse(entries.any{it.live})
+        assertEquals(listOf("first","","second"),entries.map{it.text});assertEquals(1,entries[1].images.size);assertFalse(entries[1].images[0].available);assertFalse(entries.any{it.text.contains("private")});assertFalse(entries.any{it.live})
     }
     @Test fun authIsSentInHeaderAndPasswordLoginReturnsOnlySessionToken()=runBlocking {
         MockWebServer().use{server->server.enqueue(MockResponse().setBody("{}"));server.enqueue(MockResponse().setBody("""{"token":"fresh-session-token","device":{"id":"phone-2"}}"""));val api=client(server)
@@ -96,6 +96,38 @@ class BridgeTests {
             server.enqueue(MockResponse().setResponseCode(202).setBody("""{"approvalRequired":true,"verificationCode":"ABCD-1234-5678-90EF"}"""))
             try{client(server).login("owner","password-for-test","phone");fail()}catch(e:DeviceApprovalRequired){assertEquals("ABCD-1234-5678-90EF",e.verificationCode)}
         }
+    }
+
+    @Test fun historyPreservesSafeImageReferencesAndKeepsTextSeparate(){
+        val id="12345678-1234-1234-1234-123456789abc"
+        val entry=BridgeCodec.item("t1",JSONObject("""{"id":"i1","type":"userMessage","content":[{"type":"text","text":"photo question"},{"type":"localImage","image":{"id":"$id","mime":"image/png","available":true}},{"type":"localImage","image":{"available":false}}]}"""))!!
+        assertEquals("photo question",entry.text);assertEquals(2,entry.images.size);assertEquals(id,entry.images[0].id);assertTrue(entry.images[0].available);assertFalse(entry.images[1].available)
+        val unsafe=BridgeCodec.item("t1",JSONObject("""{"id":"i2","type":"userMessage","content":[{"type":"localImage","image":{"id":"../../secrets","available":true}}]}"""))!!
+        assertFalse(unsafe.images[0].available);assertEquals("",unsafe.images[0].id)
+    }
+    @Test fun imageDownloadUsesDeviceSignatureAndDoesNotAcceptPaths()=runBlocking {
+        MockWebServer().use{server->
+            val png=java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            server.enqueue(MockResponse().addHeader("Content-Type","image/png").setBody(okio.Buffer().write(png)))
+            val api=client(server);val id="12345678-1234-1234-1234-123456789abc"
+            assertArrayEquals(png,api.image(id))
+            val r=server.takeRequest();assertEquals("/api/uploads/$id",r.path);assertEquals("Bearer private-device-token",r.getHeader("Authorization"))
+            val verifier=java.security.Signature.getInstance("SHA256withECDSA");verifier.initVerify(identity.key.public)
+            verifier.update(DeviceProof.text(api.session.token,"GET",r.getHeader("Host")!!,r.path!!,r.getHeader("x-device-time")!!,r.getHeader("x-device-nonce")!!,ByteArray(0)))
+            assertTrue(verifier.verify(java.util.Base64.getDecoder().decode(r.getHeader("x-device-signature"))))
+            try{api.image("../../secret");fail()}catch(_:IllegalArgumentException){};assertEquals(1,server.requestCount)
+        }
+    }
+    @Test fun missingImagesAndExternalRedirectsAreHandledWithoutLeakingCredentials()=runBlocking {
+        MockWebServer().use{other->MockWebServer().use{server->
+            val api=client(server);val id="12345678-1234-1234-1234-123456789abc"
+            server.enqueue(MockResponse().setResponseCode(404).setBody("{}"))
+            try{api.image(id);fail()}catch(e:BridgeException){assertEquals(404,e.status);assertTrue(e.message.contains("图片已不可用"))}
+            server.enqueue(MockResponse().setResponseCode(302).addHeader("Location",other.url("/private")))
+            try{api.image(id);fail()}catch(_:BridgeException){};assertEquals(0,other.requestCount)
+            server.enqueue(MockResponse().setBody("<html>not an image</html>").addHeader("Content-Type","text/html"))
+            try{api.image(id);fail()}catch(e:BridgeException){assertEquals("IMAGE_REQUIRED",e.code)}
+        }}
     }
 
 }

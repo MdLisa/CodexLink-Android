@@ -2,6 +2,7 @@ package com.xukaizhe.codexlink
 
 import android.app.Application
 import android.net.Uri
+import android.util.LruCache
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
@@ -32,6 +33,15 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     private var foreground=false;private var observer: Job?=null;private var socket: WebSocket?=null
     private var socketGeneration=0;private var lastSeq=0L;private var live=false;private var refreshJob: Job?=null
     private val drafts=mutableMapOf<String,Pair<String,List<Photo>>>()
+    private val imageCache=object:LruCache<String,ByteArray>(16*1024*1024){override fun sizeOf(key:String,value:ByteArray)=value.size}
+    suspend fun loadImage(id:String):ByteArray {
+        val client=api?:throw IllegalStateException("请先连接电脑。")
+        val key=client.session.address+"|"+client.session.deviceId+"|"+id
+        imageCache.get(key)?.let{return it}
+        val bytes=client.image(id)
+        check(client===api){"连接已更换，请重新打开图片。"}
+        imageCache.put(key,bytes);return bytes
+    }
     init { viewModelScope.launch {
         try { val saved=withContext(Dispatchers.IO){store.load()};api=saved.session?.let(::BridgeApi);_state.update{it.copy(loading=false,session=saved.session,loginAddress=saved.session?.address.orEmpty(),pending=saved.pending)} }
         catch(_:Exception){withContext(Dispatchers.IO){store.clear()};_state.update{it.copy(loading=false,error="本机连接信息无法读取，请重新登录；之前发给电脑的任务不会因此停止。")}}
@@ -56,7 +66,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
     fun stopObserving(){foreground=false;socketGeneration++;observer?.cancel();observer=null;socket?.cancel();socket=null;live=false}
-    private suspend fun expired(){api=null;withContext(Dispatchers.IO){store.session(null)};_state.update{it.copy(loginAddress=it.session?.address?:it.loginAddress,session=null,online=false,connection="需要重新登录",error="登录已失效，请重新输入账号密码。")}}
+    private suspend fun expired(){api=null;imageCache.evictAll();withContext(Dispatchers.IO){store.session(null)};_state.update{it.copy(loginAddress=it.session?.address?:it.loginAddress,session=null,online=false,connection="需要重新登录",error="登录已失效，请重新输入账号密码。")}}
     private fun action(block:suspend()->Unit){if(_state.value.busy)return;viewModelScope.launch{_state.update{it.copy(busy=true,error=null,notice=null)};try{ready.await();block()}catch(e:CancellationException){throw e}catch(e:Exception){failure(e)}finally{_state.update{it.copy(busy=false)}}}}
     private suspend fun failure(e:Exception){if(e is DeviceApprovalRequired){_state.update{it.copy(deviceApprovalCode=e.verificationCode,error=null)};return;};if(e is BridgeException&&e.status==401&&_state.value.session!=null){expired();return};_state.update{it.copy(error=when(e){is BridgeException,is IllegalArgumentException,is IllegalStateException->e.message;else->"连接电脑失败，请确认电脑后台正在运行，手机与电脑网络互通。未确认的消息可用原编号重试。"})}}
     fun dismissError(){_state.update{it.copy(error=null,notice=null)}}
@@ -66,7 +76,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
         require(health.str("service")=="codex-phone-bridge"){"这个地址不是 Codex 电脑连接程序。"}
         require(health.str("authMode")=="password"&&health.optBoolean("deviceSecurity")){"请先更新电脑后台，启用账号密码登录。"}
         val session=client.login(username.trim(),password,android.os.Build.MODEL)
-        val resume=foreground;stopObserving();foreground=resume;withContext(Dispatchers.IO){store.session(session)};api=BridgeApi(session);lastSeq=0
+        val resume=foreground;stopObserving();foreground=resume;imageCache.evictAll();withContext(Dispatchers.IO){store.session(session)};api=BridgeApi(session);lastSeq=0
         _state.update{ScreenState(loading=false,busy=true,session=session,loginAddress=normalized,pending=it.pending,notice="登录成功")};if(foreground)startObserving()
     }
     private suspend fun refreshQuiet(list:Boolean,history:Boolean=true){try{refresh(list,history)}catch(e:CancellationException){throw e}catch(e:Exception){if(e is BridgeException&&e.status==401)expired() else _state.update{it.copy(connection="无法刷新，正在重试")}}}
@@ -116,7 +126,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     fun loadDevices()=action{val result=api!!.request("/api/devices");_state.update{it.copy(devices=result.optJSONArray("devices")?.objects().orEmpty())}}
     fun revoke(id:String)=action{api!!.request("/api/devices/$id","DELETE");if(id==_state.value.session?.deviceId)forgetInternal() else {val result=api!!.request("/api/devices");_state.update{it.copy(devices=result.optJSONArray("devices")?.objects().orEmpty())}}}
     fun forget()=action{forgetInternal()}
-    private suspend fun forgetInternal(){val resume=foreground;stopObserving();foreground=resume;withContext(Dispatchers.IO){store.clear()};api=null;lastSeq=0;drafts.clear();_state.value=ScreenState(loading=false,notice="已移除本机连接信息；电脑任务不会因此停止。")}
+    private suspend fun forgetInternal(){val resume=foreground;stopObserving();foreground=resume;withContext(Dispatchers.IO){store.clear()};api=null;lastSeq=0;drafts.clear();imageCache.evictAll();_state.value=ScreenState(loading=false,notice="已移除本机连接信息；电脑任务不会因此停止。")}
     private fun scheduleRefresh(){refreshJob?.cancel();refreshJob=viewModelScope.launch{delay(400);refreshQuiet(true)}}
     private fun handleEvent(e:JSONObject){
         val type=e.str("type");val data=e.optJSONObject("data")?:JSONObject()

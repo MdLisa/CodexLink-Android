@@ -9,13 +9,16 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 
 fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNull { optJSONObject(it) }
 fun JSONObject.str(key: String, fallback: String = ""): String = if (isNull(key)) fallback else optString(key, fallback)
 data class Session(val address: String, val token: String, val deviceId: String, val clockOffset: Long = 0)
 data class Chat(val id: String, val name: String, val cwd: String, val control: String)
-data class Entry(val id: String, val turnId: String, val role: String, val text: String, val detail: String = "", val live: Boolean = false)
+data class ImageAttachment(val id: String, val mime: String = "", val available: Boolean = false)
+data class Entry(val id: String, val turnId: String, val role: String, val text: String, val detail: String = "", val live: Boolean = false, val images: List<ImageAttachment> = emptyList())
+fun validImageId(id: String) = Regex("[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}").matches(id)
 data class Task(val id: String, val threadId: String, val state: String, val turnId: String, val error: String) {
     val active get() = state in setOf("queued", "starting", "running", "waitingApproval")
 }
@@ -34,7 +37,14 @@ object BridgeCodec {
         val key = "$turnId:${j.str("id")}"; val type = j.str("type")
         return when (type) {
             "agentMessage" -> Entry(key, turnId, "assistant", j.str("text"))
-            "userMessage" -> Entry(key, turnId, "user", j.optJSONArray("content")?.objects()?.joinToString("\n") { if (it.str("type") == "text") it.str("text") else "[图片附件]" }.orEmpty())
+            "userMessage" -> {
+                val content=j.optJSONArray("content")?.objects().orEmpty()
+                val images=content.filter{it.str("type")!="text"}.map{part->
+                    val image=part.optJSONObject("image");val id=image?.str("id").orEmpty()
+                    ImageAttachment(if(validImageId(id))id else "",image?.str("mime").orEmpty(),validImageId(id)&&image?.optBoolean("available")==true)
+                }
+                Entry(key,turnId,"user",content.filter{it.str("type")=="text"}.joinToString("\n"){it.str("text")},images=images)
+            }
             "commandExecution" -> Entry(key, turnId, "tool", when(j.str("status")) { "inProgress" -> "正在执行命令"; "failed" -> "命令执行失败"; "declined" -> "命令已拒绝"; else -> "命令执行结果" }, j.str("command") + "\n\n" + j.str("aggregatedOutput"))
             "fileChange" -> Entry(key, turnId, "tool", "文件修改 · ${j.str("status")}", j.optJSONArray("changes")?.toString(2).orEmpty())
             "mcpToolCall" -> Entry(key, turnId, "tool", "${j.str("server")} · ${j.str("tool")} · ${j.str("status")}", (j.opt("result") ?: j.opt("error"))?.toString().orEmpty())
@@ -45,7 +55,7 @@ object BridgeCodec {
 }
 
 class BridgeApi(val session: Session, val client: OkHttpClient = defaultClient(), val identity: DeviceIdentity = AndroidDeviceIdentity) {
-    private var clockOffset=session.clockOffset
+    @Volatile private var clockOffset=session.clockOffset
     private fun authority(url:HttpUrl):String { val host=if(url.host.contains(':')) "[${url.host}]" else url.host;return if(url.port==80||url.port==443)host else "$host:${url.port}" }
     suspend fun login(username:String,password:String,deviceName:String):Session = withContext(Dispatchers.IO) {
         val result=request("/api/login","POST",JSONObject().put("username",username).put("password",password).put("deviceName",deviceName).put("publicKey",identity.publicKey()),anonymous=true)
@@ -54,6 +64,26 @@ class BridgeApi(val session: Session, val client: OkHttpClient = defaultClient()
     }
     companion object {
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(40, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build()
+    }
+    suspend fun image(id: String): ByteArray = withContext(Dispatchers.IO) {
+        require(validImageId(id)){"图片编号无效。"}
+        val path="/api/uploads/$id";val url=(session.address+path).toHttpUrl()
+        val builder=Request.Builder().url(url).header("Authorization","Bearer "+session.token)
+        DeviceProof.create(identity,session.token,"GET",authority(url),url.encodedPath,ByteArray(0),clockOffset).forEach{(key,value)->builder.header(key,value)}
+        client.newCall(builder.build()).execute().use{response->
+            if(!response.isSuccessful){
+                val message=when(response.code){401,403->"登录已失效，请重新连接电脑。";404->"图片已不可用，电脑上的原图可能已删除。";else->"图片加载失败（${response.code}），请重试。"}
+                throw BridgeException(response.code,"IMAGE_LOAD_FAILED",message)
+            }
+            val mime=response.header("Content-Type").orEmpty().substringBefore(';').lowercase()
+            if(mime !in setOf("image/png","image/jpeg","image/webp","image/gif"))throw BridgeException(response.code,"IMAGE_REQUIRED","电脑返回的内容不是图片。")
+            val body=response.body?:throw IOException("图片内容为空。")
+            val limit=10*1024*1024
+            if(body.contentLength()>limit)throw IOException("图片超过 10 MB。")
+            val bytes=ByteArrayOutputStream();val buffer=ByteArray(8192)
+            body.byteStream().use{input->while(true){val count=input.read(buffer);if(count<0)break;if(bytes.size()+count>limit)throw IOException("图片超过 10 MB。");bytes.write(buffer,0,count)}}
+            bytes.toByteArray()
+        }
     }
     suspend fun request(path: String, method: String = "GET", body: JSONObject? = null, bytes: ByteArray? = null, anonymous: Boolean = false): JSONObject = withContext(Dispatchers.IO) {
         val url=(session.address+path).toHttpUrl()
