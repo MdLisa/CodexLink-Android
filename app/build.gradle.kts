@@ -13,8 +13,8 @@ android {
         applicationId = "com.xukaizhe.codexlink"
         minSdk = 26
         targetSdk = 37
-        versionCode = 6
-        versionName = "0.4.0"
+        versionCode = 8
+        versionName = "0.4.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -33,9 +33,16 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
 }
 
 dependencies {
+    implementation("io.noties.markwon:core:4.6.2")
+    implementation("io.noties.markwon:ext-tables:4.6.2")
+    implementation("io.noties.markwon:ext-strikethrough:4.6.2")
+    testImplementation("org.robolectric:robolectric:4.17")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.1")
     implementation("androidx.exifinterface:exifinterface:1.4.2")

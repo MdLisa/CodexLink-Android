@@ -20,6 +20,7 @@ import java.util.UUID
 data class ScreenState(
     val deviceApprovalCode: String? = null, val loginAddress: String = "", val loading: Boolean = true, val busy: Boolean = false, val session: Session? = null,
     val chats: List<Chat> = emptyList(), val chatCursor: String = "", val selected: Chat? = null,
+    val chatSearch: String = "", val searchResults: List<Chat> = emptyList(), val searching: Boolean = false, val searchError: String? = null,
     val entries: List<Entry> = emptyList(), val tasks: List<Task> = emptyList(), val requests: List<JSONObject> = emptyList(),
     val historyCursor: String = "", val workspaces: List<String> = emptyList(), val connection: String = "尚未连接",
     val online: Boolean = false, val error: String? = null, val notice: String? = null,
@@ -32,6 +33,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     private val ready=CompletableDeferred<Unit>();private val refreshLock=Mutex()
     private var foreground=false;private var observer: Job?=null;private var socket: WebSocket?=null
     private var socketGeneration=0;private var lastSeq=0L;private var live=false;private var refreshJob: Job?=null
+    private var searchJob: Job?=null;private var searchGeneration=0
     private val incomingLock=Mutex();private val documentDrafts=mutableMapOf<String,List<LocalDocument>>();private val externalReceipts=mutableSetOf<String>()
     private val drafts=mutableMapOf<String,Pair<String,List<Photo>>>()
     private val imageCache=object:LruCache<String,ByteArray>(16*1024*1024){override fun sizeOf(key:String,value:ByteArray)=value.size}
@@ -67,7 +69,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
     fun stopObserving(){foreground=false;socketGeneration++;observer?.cancel();observer=null;socket?.cancel();socket=null;live=false}
-    private suspend fun expired(){api=null;imageCache.evictAll();withContext(Dispatchers.IO){store.session(null)};_state.update{it.copy(loginAddress=it.session?.address?:it.loginAddress,session=null,online=false,connection="需要重新登录",error="登录已失效，请重新输入账号密码。")}}
+    private suspend fun expired(){cancelChatSearch(currentCoroutineContext()[Job]);api=null;imageCache.evictAll();withContext(Dispatchers.IO){store.session(null)};_state.update{it.copy(loginAddress=it.session?.address?:it.loginAddress,session=null,online=false,chatSearch="",searchResults=emptyList(),searching=false,searchError=null,connection="需要重新登录",error="登录已失效，请重新输入账号密码。")}}
     private fun action(block:suspend()->Unit){if(_state.value.busy)return;viewModelScope.launch{_state.update{it.copy(busy=true,error=null,notice=null)};try{ready.await();block()}catch(e:CancellationException){throw e}catch(e:Exception){failure(e)}finally{_state.update{it.copy(busy=false,uploadProgress="")}}}}
     private suspend fun failure(e:Exception){if(e is DeviceApprovalRequired){_state.update{it.copy(deviceApprovalCode=e.verificationCode,error=null)};return;};if(e is BridgeException&&e.status==401&&_state.value.session!=null){expired();return};_state.update{it.copy(error=when(e){is BridgeException,is IllegalArgumentException,is IllegalStateException->e.message;else->"连接电脑失败，请确认电脑后台正在运行，手机与电脑网络互通。未确认的消息可用原编号重试。"})}}
     fun dismissError(){_state.update{it.copy(error=null,notice=null)}}
@@ -77,7 +79,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
         require(health.str("service")=="codex-phone-bridge"){"这个地址不是 Codex 电脑连接程序。"}
         require(health.str("authMode")=="password"&&health.optBoolean("deviceSecurity")){"请先更新电脑后台，启用账号密码登录。"}
         val session=client.login(username.trim(),password,android.os.Build.MODEL)
-        val resume=foreground;stopObserving();foreground=resume;imageCache.evictAll();withContext(Dispatchers.IO){store.session(session)};api=BridgeApi(session);lastSeq=0
+        val resume=foreground;stopObserving();cancelChatSearch();foreground=resume;imageCache.evictAll();withContext(Dispatchers.IO){store.session(session)};api=BridgeApi(session);lastSeq=0
         _state.update{ScreenState(loading=false,busy=true,session=session,loginAddress=normalized,pending=it.pending,incomingFiles=it.incomingFiles,importing=it.importing,notice="登录成功")};if(foreground)startObserving()
     }
     private suspend fun refreshQuiet(list:Boolean,history:Boolean=true){try{refresh(list,history)}catch(e:CancellationException){throw e}catch(e:Exception){if(e is BridgeException&&e.status==401)expired() else _state.update{it.copy(connection="无法刷新，正在重试")}}}
@@ -100,12 +102,29 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
     }
-    fun refreshNow()=action{refresh(true);_state.update{it.copy(notice="已刷新电脑上的聊天记录")}}
+    fun refreshNow()=action{refresh(true);if(_state.value.chatSearch.isNotBlank())searchChats(_state.value.chatSearch);_state.update{it.copy(notice="已刷新电脑上的聊天记录")}}
+    private fun cancelChatSearch(except:Job?=null){searchGeneration++;searchJob?.takeUnless{it===except}?.cancel();searchJob=null}
+    fun searchChats(query:String){
+        cancelChatSearch();val term=query.take(200);val generation=searchGeneration;val client=api
+        _state.update{it.copy(chatSearch=term,searchResults=emptyList(),searching=term.isNotBlank()&&client!=null,searchError=null)}
+        if(term.isBlank()||client==null)return
+        searchJob=viewModelScope.launch {
+            delay(300)
+            try{
+                val results=client.searchChatCatalog(term)
+                if(generation==searchGeneration&&client===api)_state.update{it.copy(searchResults=results)}
+            }catch(e:CancellationException){throw e}
+            catch(e:Exception){if(generation==searchGeneration&&client===api){
+                if(e is BridgeException&&e.status==401)expired()
+                else _state.update{it.copy(searchError=if(e is BridgeException||e is IllegalStateException)e.message else "搜索失败，请检查连接后重试。")}
+            }}finally{if(generation==searchGeneration&&client===api)_state.update{it.copy(searching=false)}}
+        }
+    }
     fun moreChats()=action{val cursor=_state.value.chatCursor;if(cursor.isNotEmpty()){val result=api!!.request("/api/threads?cursor="+encode(cursor));_state.update{it.copy(chats=(it.chats+result.optJSONArray("threads")?.objects().orEmpty().map(BridgeCodec::chat)).distinctBy(Chat::id),chatCursor=result.str("nextCursor"))}}}
     fun open(chat:Chat)=action{openInternal(chat)}
     private suspend fun openInternal(chat:Chat){rememberDraft();val draft=drafts[chat.id];_state.update{it.copy(selected=chat,entries=emptyList(),tasks=emptyList(),historyCursor="",draft=draft?.first.orEmpty(),photos=draft?.second.orEmpty(),files=documentDrafts[documentKey(chat.id)].orEmpty())};withContext(Dispatchers.IO){store.lastChat(chat.id)};refresh(false)}
     private fun rememberDraft(){_state.value.selected?.id?.let{drafts[it]=_state.value.draft to _state.value.photos}}
-    fun back(){rememberDraft();_state.update{it.copy(selected=null,entries=emptyList(),tasks=emptyList(),draft="",photos=emptyList())}}
+    fun back(){rememberDraft();_state.update{it.copy(selected=null,entries=emptyList(),tasks=emptyList(),draft="",photos=emptyList())};if(_state.value.chatSearch.isNotBlank())searchChats(_state.value.chatSearch)}
     fun create(name:String,cwd:String,attachIncoming:Boolean=false)=action{val result=api!!.request("/api/threads","POST",JSONObject().put("name",name.ifBlank{"手机聊天"}).put("cwd",cwd));val chat=BridgeCodec.chat(result);_state.update{it.copy(chats=listOf(chat)+it.chats)};openInternal(chat);if(attachIncoming)attachIncomingInternal()}
     fun moreHistory()=action{val chat=_state.value.selected?:return@action;val cursor=_state.value.historyCursor;if(cursor.isNotEmpty()){val result=api!!.request("/api/threads/${chat.id}/history?limit=20&cursor="+encode(cursor));if(_state.value.selected?.id==chat.id)_state.update{it.copy(entries=(BridgeCodec.history(result)+it.entries).distinctBy(Entry::id),historyCursor=result.str("nextCursor"))}}}
     private fun documentKey(chatId:String)=api?.session?.address.orEmpty()+"|"+chatId
@@ -142,7 +161,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     fun loadDevices()=action{val result=api!!.request("/api/devices");_state.update{it.copy(devices=result.optJSONArray("devices")?.objects().orEmpty())}}
     fun revoke(id:String)=action{api!!.request("/api/devices/$id","DELETE");if(id==_state.value.session?.deviceId)forgetInternal() else {val result=api!!.request("/api/devices");_state.update{it.copy(devices=result.optJSONArray("devices")?.objects().orEmpty())}}}
     fun forget()=action{forgetInternal()}
-    private suspend fun forgetInternal(){val resume=foreground;stopObserving();foreground=resume;withContext(Dispatchers.IO){store.forgetConnection()};api=null;lastSeq=0;drafts.clear();documentDrafts.clear();imageCache.evictAll();_state.value=ScreenState(loading=false,incomingFiles=_state.value.incomingFiles,notice="已移除本机连接信息；电脑任务不会因此停止。")}
+    private suspend fun forgetInternal(){val resume=foreground;stopObserving();cancelChatSearch();foreground=resume;withContext(Dispatchers.IO){store.forgetConnection()};api=null;lastSeq=0;drafts.clear();documentDrafts.clear();imageCache.evictAll();_state.value=ScreenState(loading=false,incomingFiles=_state.value.incomingFiles,notice="已移除本机连接信息；电脑任务不会因此停止。")}
     private fun scheduleRefresh(){refreshJob?.cancel();refreshJob=viewModelScope.launch{delay(400);refreshQuiet(true)}}
     private fun handleEvent(e:JSONObject){
         val type=e.str("type");val data=e.optJSONObject("data")?:JSONObject()
