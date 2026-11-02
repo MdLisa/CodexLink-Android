@@ -13,8 +13,8 @@ android {
         applicationId = "com.xukaizhe.codexlink"
         minSdk = 26
         targetSdk = 37
-        versionCode = 9
-        versionName = "0.5.0"
+        versionCode = 13
+        versionName = "0.9.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -38,10 +38,20 @@ android {
     }
 }
 
+tasks.withType<Test>().configureEach {
+    // Native Robolectric graphics cannot extract ICU data under a non-ASCII Windows temp path.
+    val nativeTemp = providers.gradleProperty("codexlink.testTmpDir")
+        .getOrElse(layout.buildDirectory.dir("native-test-tmp").get().asFile.absolutePath)
+    systemProperty("java.io.tmpdir", nativeTemp)
+    doFirst { file(nativeTemp).mkdirs() }
+}
+
 dependencies {
     implementation("io.noties.markwon:core:4.6.2")
     implementation("io.noties.markwon:ext-tables:4.6.2")
     implementation("io.noties.markwon:ext-strikethrough:4.6.2")
+    implementation("io.noties.markwon:inline-parser:4.6.2")
+    implementation("io.noties.markwon:ext-latex:4.6.2")
     testImplementation("org.robolectric:robolectric:4.17")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.1")

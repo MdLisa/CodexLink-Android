@@ -23,6 +23,12 @@ import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.ext.tables.TableAwareMovementMethod
 import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.ext.tables.TableTheme
+import io.noties.markwon.ext.latex.JLatexMathPlugin
+import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+
+private val mathExecutor = Executors.newFixedThreadPool(2) { task -> Thread(task, "message-math").apply { isDaemon = true } }
 
 internal fun createMessageMarkdown(
     context: Context,
@@ -30,7 +36,14 @@ internal fun createMessageMarkdown(
     linkColor: Int,
     codeBackground: Int,
     borderColor: Int,
+    textSizePx: Float = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 16f, context.resources.displayMetrics),
+    formulaExecutor: ExecutorService = mathExecutor,
 ): Markwon = Markwon.builder(context)
+    .usePlugin(MarkwonInlineParserPlugin.create())
+    .usePlugin(JLatexMathPlugin.create(textSizePx) { builder ->
+        builder.inlinesEnabled(true).executorService(formulaExecutor).errorHandler { _, _ -> null }
+        builder.theme().textColor(textColor).blockFitCanvas(true)
+    })
     .usePlugin(StrikethroughPlugin.create())
     .usePlugin(TablePlugin.create(TableTheme.Builder()
         .tableBorderColor(borderColor)
@@ -38,6 +51,7 @@ internal fun createMessageMarkdown(
         .tableHeaderRowBackgroundColor(codeBackground)
         .build()))
     .usePlugin(object : AbstractMarkwonPlugin() {
+        override fun processMarkdown(markdown: String) = prepareMathMarkdown(markdown)
         override fun configureTheme(builder: MarkwonTheme.Builder) {
             builder.linkColor(linkColor)
                 .codeTextColor(textColor)
@@ -79,14 +93,14 @@ internal fun MarkdownMessage(markdown: String, modifier: Modifier = Modifier) {
     val link = colors.primary.toArgb()
     val code = colors.surfaceVariant.toArgb()
     val border = colors.outline.toArgb()
-    val renderer = remember(context, foreground, link, code, border) {
-        createMessageMarkdown(context, foreground, link, code, border)
-    }
-    val rendered = remember(renderer, markdown) { renderer.toMarkdown(markdown) }
     val density = LocalDensity.current
     val style = MaterialTheme.typography.bodyLarge
     val textSize = with(density) { style.fontSize.toPx() }
     val lineHeight = with(density) { style.lineHeight.toPx() }
+    val renderer = remember(context, foreground, link, code, border, textSize) {
+        createMessageMarkdown(context, foreground, link, code, border, textSize)
+    }
+    val rendered = remember(renderer, markdown) { renderer.toMarkdown(markdown) }
     AndroidView(
         modifier = modifier.fillMaxWidth(),
         factory = ::createMarkdownTextView,

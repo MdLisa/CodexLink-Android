@@ -26,7 +26,7 @@ class MessageSender(private val api: BridgeApi) {
         persist(pending)
         val result = api.request(
             "/api/threads/${pending.threadId}/messages", "POST",
-            JSONObject().put("messageId", pending.messageId).put("text", pending.text).put("attachmentIds", JSONArray(pending.uploaded)).apply{if(pending.uploadedFiles.isNotEmpty())put("fileIds",JSONArray(pending.uploadedFiles))}
+            JSONObject().put("messageId", pending.messageId).put("text", pending.text).put("attachmentIds", JSONArray(pending.uploaded)).apply{if(pending.uploadedFiles.isNotEmpty())put("fileIds",JSONArray(pending.uploadedFiles));if(pending.modeRevision.isNotEmpty())put("modeRevision",pending.modeRevision)}
         )
         persist(null)
         return result

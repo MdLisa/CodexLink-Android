@@ -22,7 +22,7 @@ data class Chat(val id: String, val name: String, val cwd: String, val control: 
 data class ImageAttachment(val id: String, val mime: String = "", val available: Boolean = false)
 data class Entry(val id: String, val turnId: String, val role: String, val text: String, val detail: String = "", val live: Boolean = false, val images: List<ImageAttachment> = emptyList(),val files:List<FileAttachment> = emptyList())
 fun validImageId(id: String) = Regex("[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}").matches(id)
-data class Task(val id: String, val threadId: String, val state: String, val turnId: String, val error: String) {
+data class Task(val id: String, val threadId: String, val state: String, val turnId: String, val error: String, val approvalsReviewer: String = "") {
     val active get() = state in setOf("queued", "starting", "running", "waitingApproval")
 }
 class BridgeException(val status: Int, val code: String, override val message: String) : IOException(message)
@@ -35,7 +35,7 @@ object BridgeCodec {
         return url.toString().trimEnd('/')
     }
     fun chat(j: JSONObject) = Chat(j.str("id"), j.str("name", "未命名聊天"), j.str("cwd"), j.str("control"))
-    fun task(j: JSONObject) = Task(j.str("id"), j.str("threadId"), j.str("state"), j.str("turnId"), j.str("error"))
+    fun task(j: JSONObject) = Task(j.str("id"), j.str("threadId"), j.str("state"), j.str("turnId"), j.str("error"), j.str("approvalsReviewer"))
     fun item(turnId: String, j: JSONObject): Entry? {
         val key = "$turnId:${j.str("id")}"; val type = j.str("type")
         return when (type) {
@@ -51,6 +51,7 @@ object BridgeCodec {
             "commandExecution" -> Entry(key, turnId, "tool", when(j.str("status")) { "inProgress" -> "正在执行命令"; "failed" -> "命令执行失败"; "declined" -> "命令已拒绝"; else -> "命令执行结果" }, j.str("command") + "\n\n" + j.str("aggregatedOutput"))
             "fileChange" -> Entry(key, turnId, "tool", "文件修改 · ${j.str("status")}", j.optJSONArray("changes")?.toString(2).orEmpty())
             "mcpToolCall" -> Entry(key, turnId, "tool", "${j.str("server")} · ${j.str("tool")} · ${j.str("status")}", (j.opt("result") ?: j.opt("error"))?.toString().orEmpty())
+            "webSearch" -> Entry(key, turnId, "tool", "联网搜索", j.str("query"))
             else -> null
         }
     }
