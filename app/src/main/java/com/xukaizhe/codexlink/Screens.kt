@@ -102,7 +102,7 @@ import org.json.JSONObject
             Button(onClick={login(address,username,password)},enabled=!s.busy&&address.isNotBlank()&&username.isNotBlank()&&password.isNotEmpty(),shape=RoundedCornerShape(14.dp),modifier=Modifier.fillMaxWidth().height(52.dp).testTag("login")){Text(if(!networkAllowed)"允许访问并连接" else if(s.deviceApprovalCode!=null)"已在电脑批准，重新登录" else "连接电脑",fontWeight=FontWeight.Bold)}
         }}
         Text("填写电脑后台提供的地址。登录后会安全保存连接凭据，不需要每次输入密码。外网使用 HTTPS 地址。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary,lineHeight=21.sp)
-        Text("个人使用 · v0.4.2",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
+        Text("个人使用 · v0.5.0",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
     }
 }
 @Composable private fun ChatsScreen(s:ScreenState,vm:BridgeViewModel,newChat:()->Unit,request:(JSONObject)->Unit){
@@ -170,8 +170,8 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
         Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){TextButton(onClick={picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))},enabled=!s.busy&&s.pending==null&&s.photos.size+s.files.size<8){Text("＋ 图片")};TextButton(onClick={documents.launch(arrayOf("*/*"))},enabled=!s.busy&&!s.importing&&s.pending==null&&s.photos.size+s.files.size<8){Text("＋ 文件")};Spacer(Modifier.weight(1f));Button(onClick={if(networkAllowed)vm.send() else requestNetwork()},enabled=!s.busy&&s.pending==null&&(s.draft.isNotBlank()||s.photos.isNotEmpty()||s.files.isNotEmpty()),shape=RoundedCornerShape(12.dp),modifier=Modifier.testTag("send")){Text("发送 ↑")}}
     }}
 }
-@Composable private fun NewChatDialog(s:ScreenState,dismiss:()->Unit,create:(String,String)->Unit){var name by rememberSaveable{mutableStateOf("")};var workspace by rememberSaveable{mutableStateOf(s.workspaces.firstOrNull().orEmpty())}
-    AlertDialog(onDismissRequest=dismiss,title={Text("新建聊天")},text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)){OutlinedTextField(name,{name=it.take(100)},label={Text("聊天名称")},modifier=Modifier.testTag("chatName"));Text("选择电脑上的项目",style=MaterialTheme.typography.labelLarge);s.workspaces.forEach{path->Surface(onClick={workspace=path},color=if(path==workspace)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,shape=RoundedCornerShape(12.dp)){Column(Modifier.fillMaxWidth().padding(12.dp)){Text(folder(path),fontWeight=FontWeight.Medium);Text(path,style=MaterialTheme.typography.bodySmall)}}}}},confirmButton={TextButton(onClick={create(name,workspace)},enabled=workspace.isNotEmpty()){Text("创建")}},dismissButton={TextButton(onClick=dismiss){Text("取消")}})
+@Composable private fun NewChatDialog(s:ScreenState,dismiss:()->Unit,create:(String,String)->Unit){var name by rememberSaveable{mutableStateOf("")};var workspace by rememberSaveable(s.projectScope.revision,s.workspaces){mutableStateOf(s.workspaces.firstOrNull().orEmpty())}
+    AlertDialog(onDismissRequest=dismiss,title={Text("新建聊天")},text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)){OutlinedTextField(name,{name=it.take(100)},label={Text("聊天名称")},modifier=Modifier.testTag("chatName"));Text(if(s.projectScope.all)"项目范围：所有目录" else "选择电脑上的项目",style=MaterialTheme.typography.labelLarge);s.workspaces.forEach{path->Surface(onClick={workspace=path},color=if(path==workspace)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,shape=RoundedCornerShape(12.dp)){Column(Modifier.fillMaxWidth().padding(12.dp)){Text(folder(path),fontWeight=FontWeight.Medium);Text(path,style=MaterialTheme.typography.bodySmall)}}};if(s.projectScope.all)OutlinedTextField(workspace,{workspace=it.take(1000)},label={Text("项目完整路径")},supportingText={Text("填写电脑上已存在的目录，例如 D:\\Projects\\MyApp")},modifier=Modifier.fillMaxWidth().testTag("workspacePath"))}},confirmButton={TextButton(onClick={create(name,workspace.trim())},enabled=workspace.isNotBlank()&&s.online){Text("创建")}},dismissButton={TextButton(onClick=dismiss){Text("取消")}})
 }
 @Composable private fun SettingsDialog(s:ScreenState,vm:BridgeViewModel,dismiss:()->Unit,forget:()->Unit){var revoke by remember{mutableStateOf<String?>(null)}
     AlertDialog(
@@ -181,8 +181,11 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
             Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(14.dp)){
                 Text(s.session?.address.orEmpty())
                 Text(s.connection,color=MaterialTheme.colorScheme.primary)
+                Text(if(s.projectScope.all)"项目范围：所有目录" else "项目范围：指定目录",fontWeight=FontWeight.Medium)
+                if(!s.projectScope.all)s.projectScope.roots.forEach{Text(it,style=MaterialTheme.typography.bodySmall)}
+                Text("项目范围由电脑控制台为本机设备设置。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)
                 HorizontalDivider()
-                Text("已登录设备",fontWeight=FontWeight.SemiBold)
+                Text("本机登录连接",fontWeight=FontWeight.SemiBold)
                 s.devices.filter{it.isNull("revoked_at")}.forEach{device->
                     Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
                         val label=device.str("name")+(if(device.str("id")==s.session?.deviceId)"（本机）" else "")
@@ -192,7 +195,7 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
                 }
                 Text("关闭手机应用不会停止电脑任务。重新打开后会自动连接，刷新即可查看结果。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)
                 TextButton(onClick=forget,enabled=!s.busy){Text("移除本机连接信息")}
-                Text("掌上 Codex · 0.4.2",style=MaterialTheme.typography.labelSmall)
+                Text("掌上 Codex · 0.5.0",style=MaterialTheme.typography.labelSmall)
             }
         },
         confirmButton={TextButton(onClick=dismiss){Text("完成")}}
