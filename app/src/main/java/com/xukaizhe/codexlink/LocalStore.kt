@@ -21,12 +21,12 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 data class Photo(val path: String)
-data class Pending(val messageId: String, val address: String, val threadId: String, val text: String, val photos: List<String>, val uploaded: List<String> = emptyList(), val submitted: Boolean = false) {
-    fun json() = JSONObject().put("messageId", messageId).put("address", address).put("threadId", threadId).put("text", text).put("photos", JSONArray(photos)).put("uploaded", JSONArray(uploaded)).put("submitted", submitted)
-    companion object { fun from(j: JSONObject) = Pending(j.str("messageId"), j.str("address"), j.str("threadId"), j.str("text"), j.optJSONArray("photos").strings(), j.optJSONArray("uploaded").strings(), j.optBoolean("submitted")) }
+data class Pending(val messageId: String, val address: String, val threadId: String, val text: String, val photos: List<String>, val uploaded: List<String> = emptyList(), val submitted: Boolean = false, val files: List<LocalDocument> = emptyList(), val uploadedFiles: List<String> = emptyList()) {
+    fun json() = JSONObject().put("messageId", messageId).put("address", address).put("threadId", threadId).put("text", text).put("photos", JSONArray(photos)).put("uploaded", JSONArray(uploaded)).put("submitted", submitted).put("files",JSONArray(files.map{it.json()})).put("uploadedFiles",JSONArray(uploadedFiles))
+    companion object { fun from(j: JSONObject) = Pending(j.str("messageId"), j.str("address"), j.str("threadId"), j.str("text"), j.optJSONArray("photos").strings(), j.optJSONArray("uploaded").strings(), j.optBoolean("submitted"),j.optJSONArray("files")?.objects().orEmpty().map(LocalDocument::from),j.optJSONArray("uploadedFiles").strings()) }
 }
 private fun JSONArray?.strings(): List<String> = if (this == null) emptyList() else (0 until length()).map { getString(it) }
-data class Saved(val session: Session?, val pending: Pending?, val lastChat: String)
+data class Saved(val session: Session?, val pending: Pending?, val lastChat: String,val incoming:List<LocalDocument> = emptyList(),val documentDrafts:Map<String,List<LocalDocument>> = emptyMap(),val externalReceipts:List<String> = emptyList())
 class LocalStore(context: Context) {
     private val prefs = context.getSharedPreferences("codexlink_private", Context.MODE_PRIVATE)
     private val alias = "codexlink_connection_v1"
@@ -45,10 +45,13 @@ class LocalStore(context: Context) {
         val value = Base64.encodeToString(cipher.iv, Base64.NO_WRAP) + "." + Base64.encodeToString(cipher.doFinal(j.toString().toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
         check(prefs.edit().putString("vault", value).commit()) { "无法保存本机连接状态，请检查手机存储空间。" }
     }
-    @Synchronized fun load(): Saved { val j=root();val s=j.optJSONObject("session");return Saved(s?.let { Session(it.str("address"), it.str("token"), it.str("deviceId"),it.optLong("clockOffset")) }, j.optJSONObject("pending")?.let(Pending::from), j.str("lastChat")) }
+    @Synchronized fun load(): Saved { val j=root();val s=j.optJSONObject("session");return Saved(s?.let { Session(it.str("address"), it.str("token"), it.str("deviceId"),it.optLong("clockOffset")) }, j.optJSONObject("pending")?.let(Pending::from), j.str("lastChat"),j.optJSONArray("incoming")?.objects().orEmpty().map(LocalDocument::from),j.optJSONObject("documentDrafts")?.let{d->d.keys().asSequence().associateWith{k->d.optJSONArray(k)?.objects().orEmpty().map(LocalDocument::from)}}.orEmpty(),j.optJSONArray("externalReceipts").strings()) }
     @Synchronized fun session(s: Session?) { val j=root();if(s==null)j.remove("session") else j.put("session",JSONObject().put("address",s.address).put("token",s.token).put("deviceId",s.deviceId).put("clockOffset",s.clockOffset));write(j) }
     @Synchronized fun pending(p: Pending?) { val j=root();if(p==null)j.remove("pending") else j.put("pending",p.json());write(j) }
     @Synchronized fun lastChat(id: String) { write(root().put("lastChat",id)) }
+    @Synchronized fun incoming(files:List<LocalDocument>,receipt:String?=null){val j=root();j.put("incoming",JSONArray(files.map{it.json()}));if(receipt!=null)j.put("externalReceipts",JSONArray((j.optJSONArray("externalReceipts").strings()+receipt).takeLast(64)));write(j)}
+    @Synchronized fun documentDraft(key:String,files:List<LocalDocument>){val j=root();val drafts=j.optJSONObject("documentDrafts")?:JSONObject();if(files.isEmpty())drafts.remove(key) else drafts.put(key,JSONArray(files.map{it.json()}));j.put("documentDrafts",drafts);write(j)}
+    @Synchronized fun forgetConnection(){val old=root();val j=JSONObject();for(key in listOf("incoming","externalReceipts"))if(old.has(key))j.put(key,old.get(key));write(j)}
     @Synchronized fun clear() { check(prefs.edit().clear().commit()) { "无法清除本机连接信息，请检查手机存储空间。" } }
 }
 

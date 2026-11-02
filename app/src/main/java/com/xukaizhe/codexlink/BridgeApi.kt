@@ -8,6 +8,9 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import okio.BufferedSink
+import okio.ForwardingSink
+import okio.buffer
 import java.io.IOException
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
@@ -17,7 +20,7 @@ fun JSONObject.str(key: String, fallback: String = ""): String = if (isNull(key)
 data class Session(val address: String, val token: String, val deviceId: String, val clockOffset: Long = 0)
 data class Chat(val id: String, val name: String, val cwd: String, val control: String)
 data class ImageAttachment(val id: String, val mime: String = "", val available: Boolean = false)
-data class Entry(val id: String, val turnId: String, val role: String, val text: String, val detail: String = "", val live: Boolean = false, val images: List<ImageAttachment> = emptyList())
+data class Entry(val id: String, val turnId: String, val role: String, val text: String, val detail: String = "", val live: Boolean = false, val images: List<ImageAttachment> = emptyList(),val files:List<FileAttachment> = emptyList())
 fun validImageId(id: String) = Regex("[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}").matches(id)
 data class Task(val id: String, val threadId: String, val state: String, val turnId: String, val error: String) {
     val active get() = state in setOf("queued", "starting", "running", "waitingApproval")
@@ -43,7 +46,7 @@ object BridgeCodec {
                     val image=part.optJSONObject("image");val id=image?.str("id").orEmpty()
                     ImageAttachment(if(validImageId(id))id else "",image?.str("mime").orEmpty(),validImageId(id)&&image?.optBoolean("available")==true)
                 }
-                Entry(key,turnId,"user",content.filter{it.str("type")=="text"}.joinToString("\n"){it.str("text")},images=images)
+                Entry(key,turnId,"user",content.filter{it.str("type")=="text"}.joinToString("\n"){it.str("text")},images=images,files=j.optJSONArray("files")?.objects().orEmpty().map{FileAttachment(it.str("id"),it.str("name","附件"),it.optLong("size"),it.optBoolean("available"))})
             }
             "commandExecution" -> Entry(key, turnId, "tool", when(j.str("status")) { "inProgress" -> "正在执行命令"; "failed" -> "命令执行失败"; "declined" -> "命令已拒绝"; else -> "命令执行结果" }, j.str("command") + "\n\n" + j.str("aggregatedOutput"))
             "fileChange" -> Entry(key, turnId, "tool", "文件修改 · ${j.str("status")}", j.optJSONArray("changes")?.toString(2).orEmpty())
@@ -85,7 +88,7 @@ class BridgeApi(val session: Session, val client: OkHttpClient = defaultClient()
             bytes.toByteArray()
         }
     }
-    suspend fun request(path: String, method: String = "GET", body: JSONObject? = null, bytes: ByteArray? = null, anonymous: Boolean = false): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun request(path: String, method: String = "GET", body: JSONObject? = null, bytes: ByteArray? = null, anonymous: Boolean = false, uploadProgress:((Long,Long)->Unit)?=null): JSONObject = withContext(Dispatchers.IO) {
         val url=(session.address+path).toHttpUrl()
         val payload=if(method=="GET")ByteArray(0) else bytes?:(body?:JSONObject()).toString().toByteArray(Charsets.UTF_8)
         val builder=Request.Builder().url(url)
@@ -94,7 +97,15 @@ class BridgeApi(val session: Session, val client: OkHttpClient = defaultClient()
             val target=url.encodedPath+(url.encodedQuery?.let{"?$it"}?:"")
             DeviceProof.create(identity,if(anonymous)"" else session.token,method,authority(url),target,payload,clockOffset).forEach{(key,value)->builder.header(key,value)}
         }
-        if(method!="GET")builder.method(method,payload.toRequestBody((if(bytes!=null)"application/octet-stream" else "application/json; charset=utf-8").toMediaType()))
+        if(method!="GET"){
+            val original=payload.toRequestBody((if(bytes!=null)"application/octet-stream" else "application/json; charset=utf-8").toMediaType())
+            val requestBody=if(uploadProgress==null)original else object:RequestBody(){
+                override fun contentType()=original.contentType()
+                override fun contentLength()=original.contentLength()
+                override fun writeTo(sink:BufferedSink){var sent=0L;val counting=object:ForwardingSink(sink){override fun write(source:okio.Buffer,byteCount:Long){super.write(source,byteCount);sent+=byteCount;uploadProgress.invoke(sent,payload.size.toLong())}}.buffer();original.writeTo(counting);counting.flush()}
+            }
+            builder.method(method,requestBody)
+        }
         client.newCall(builder.build()).execute().use { response ->
             val text = response.body?.string().orEmpty()
             val json = try { JSONObject(text) } catch (_: Exception) { throw BridgeException(response.code, "INVALID_RESPONSE", "电脑没有返回有效数据，请检查地址是否指向 Codex 连接程序。") }
@@ -102,6 +113,11 @@ class BridgeApi(val session: Session, val client: OkHttpClient = defaultClient()
             if (!response.isSuccessful) throw BridgeException(response.code, json.optJSONObject("error")?.str("code").orEmpty(), json.optJSONObject("error")?.str("message", "请求失败（${response.code}）") ?: "请求失败（${response.code}）")
             json
         }
+    }
+    suspend fun uploadDocument(file:LocalDocument,bytes:ByteArray,progress:((Long,Long)->Unit)?=null):JSONObject {
+        require(validImageId(file.id)&&bytes.size.toLong()==file.size&&file.size<=DOCUMENT_LIMIT){"附件内容已改变或超过 10 MB，请重新选择。"}
+        val url=session.address.toHttpUrl().newBuilder().addPathSegment("api").addPathSegment("files").addQueryParameter("id",file.id).addQueryParameter("name",file.name).addQueryParameter("mime",file.mime).build()
+        return request(url.encodedPath+"?"+url.encodedQuery,"POST",bytes=bytes,uploadProgress=progress)
     }
     fun socket(after: Long, event: (JSONObject) -> Unit, ended: (Int) -> Unit): WebSocket {
         val wsClient = client.newBuilder().callTimeout(0, TimeUnit.MILLISECONDS).pingInterval(20, TimeUnit.SECONDS).build()

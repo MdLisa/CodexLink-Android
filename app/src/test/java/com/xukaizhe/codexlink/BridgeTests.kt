@@ -130,4 +130,34 @@ class BridgeTests {
         }}
     }
 
+    @Test fun documentMetadataAndPendingUploadsSurviveSerialization(){
+        val document=LocalDocument("12345678-1234-1234-1234-123456789abc","任务书.docx","application/octet-stream","document.docx",3)
+        val pending=Pending("file-message-0001","https://computer.example","thread","read it",emptyList(),files=listOf(document),uploadedFiles=listOf(document.id))
+        val restored=Pending.from(JSONObject(pending.json().toString()));assertEquals(document,restored.files.single());assertEquals(listOf(document.id),restored.uploadedFiles)
+        val old=Pending.from(JSONObject("""{"messageId":"old-message-001","address":"http://localhost","threadId":"t","text":"hi","photos":[],"uploaded":[],"submitted":false}"""));assertTrue(old.files.isEmpty());assertTrue(old.uploadedFiles.isEmpty())
+    }
+    @Test fun documentUploadSignsFilenameAndBodyAndIncludesTheFileInTheMessage()=runBlocking {
+        MockWebServer().use{server->
+            val id="12345678-1234-1234-1234-123456789abc";val api=client(server)
+            server.enqueue(MockResponse().setResponseCode(201).setBody(JSONObject().put("id",id).toString()));server.enqueue(MockResponse().setResponseCode(202).setBody("{}"))
+            val document=LocalDocument(id,"任务书.docx","application/octet-stream","document.docx",3);var pending:Pending?=Pending("file-message-0002",api.session.address,"t","read it",emptyList(),files=listOf(document));val progress=mutableListOf<String>()
+            MessageSender(api).send(pending!!,{pending=it},{byteArrayOf(1,2,3)},{progress.add(it)})
+            val upload=server.takeRequest();assertEquals("/api/files",upload.requestUrl!!.encodedPath);assertEquals(document.name,upload.requestUrl!!.queryParameter("name"));assertArrayEquals(byteArrayOf(1,2,3),upload.body.clone().readByteArray())
+            val verifier=java.security.Signature.getInstance("SHA256withECDSA");verifier.initVerify(identity.key.public);verifier.update(DeviceProof.text(api.session.token,"POST",upload.getHeader("Host")!!,upload.path!!,upload.getHeader("x-device-time")!!,upload.getHeader("x-device-nonce")!!,byteArrayOf(1,2,3)));assertTrue(verifier.verify(java.util.Base64.getDecoder().decode(upload.getHeader("x-device-signature"))))
+            val message=JSONObject(server.takeRequest().body.readUtf8());assertEquals(id,message.getJSONArray("fileIds").getString(0));assertEquals("read it",message.getString("text"));assertNull(pending);assertTrue(progress.any{it.contains("100%")})
+        }
+    }
+    @Test fun completedDocumentUploadIsNotRepeatedWhenMessageDeliveryIsRetried()=runBlocking {
+        MockWebServer().use{server->
+            val api=client(server);val id="12345678-1234-1234-1234-123456789abc";val document=LocalDocument(id,"notes.txt","text/plain","notes.txt",3)
+            var pending:Pending?=Pending("file-message-0003",api.session.address,"t","read",emptyList(),files=listOf(document),uploadedFiles=listOf(id),submitted=true)
+            server.enqueue(MockResponse().setResponseCode(202).setBody("{}"));MessageSender(api).send(pending!!,{pending=it},{error("should not upload again")})
+            assertEquals(1,server.requestCount);assertEquals("/api/threads/t/messages",server.takeRequest().requestUrl!!.encodedPath);assertNull(pending)
+        }
+    }
+    @Test fun fileCardsArePreservedInHistoryWithoutInventingImageAttachments(){
+        val entry=BridgeCodec.item("t",JSONObject("""{"id":"u","type":"userMessage","content":[{"type":"text","text":"read"}],"files":[{"id":"f","name":"report.pdf","size":42,"available":true}]}"""))!!
+        assertEquals("read",entry.text);assertTrue(entry.images.isEmpty());assertEquals("report.pdf",entry.files.single().name);assertTrue(entry.files.single().available)
+    }
+
 }

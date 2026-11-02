@@ -24,7 +24,7 @@ data class ScreenState(
     val historyCursor: String = "", val workspaces: List<String> = emptyList(), val connection: String = "尚未连接",
     val online: Boolean = false, val error: String? = null, val notice: String? = null,
     val draft: String = "", val photos: List<Photo> = emptyList(), val pending: Pending? = null,
-    val devices: List<JSONObject> = emptyList()
+    val devices: List<JSONObject> = emptyList(),val files:List<LocalDocument> = emptyList(),val incomingFiles:List<LocalDocument> = emptyList(),val importing:Boolean=false,val uploadProgress:String=""
 )
 class BridgeViewModel(application: Application) : AndroidViewModel(application) {
     private val _state=MutableStateFlow(ScreenState());val state=_state.asStateFlow()
@@ -32,6 +32,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     private val ready=CompletableDeferred<Unit>();private val refreshLock=Mutex()
     private var foreground=false;private var observer: Job?=null;private var socket: WebSocket?=null
     private var socketGeneration=0;private var lastSeq=0L;private var live=false;private var refreshJob: Job?=null
+    private val incomingLock=Mutex();private val documentDrafts=mutableMapOf<String,List<LocalDocument>>();private val externalReceipts=mutableSetOf<String>()
     private val drafts=mutableMapOf<String,Pair<String,List<Photo>>>()
     private val imageCache=object:LruCache<String,ByteArray>(16*1024*1024){override fun sizeOf(key:String,value:ByteArray)=value.size}
     suspend fun loadImage(id:String):ByteArray {
@@ -43,7 +44,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
         imageCache.put(key,bytes);return bytes
     }
     init { viewModelScope.launch {
-        try { val saved=withContext(Dispatchers.IO){store.load()};api=saved.session?.let(::BridgeApi);_state.update{it.copy(loading=false,session=saved.session,loginAddress=saved.session?.address.orEmpty(),pending=saved.pending)} }
+        try { val saved=withContext(Dispatchers.IO){store.load()};api=saved.session?.let(::BridgeApi);documentDrafts.putAll(saved.documentDrafts);externalReceipts.addAll(saved.externalReceipts);_state.update{it.copy(loading=false,session=saved.session,loginAddress=saved.session?.address.orEmpty(),pending=saved.pending,incomingFiles=saved.incoming)} }
         catch(_:Exception){withContext(Dispatchers.IO){store.clear()};_state.update{it.copy(loading=false,error="本机连接信息无法读取，请重新登录；之前发给电脑的任务不会因此停止。")}}
         ready.complete(Unit);if(foreground)startObserving()
     } }
@@ -67,7 +68,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     }
     fun stopObserving(){foreground=false;socketGeneration++;observer?.cancel();observer=null;socket?.cancel();socket=null;live=false}
     private suspend fun expired(){api=null;imageCache.evictAll();withContext(Dispatchers.IO){store.session(null)};_state.update{it.copy(loginAddress=it.session?.address?:it.loginAddress,session=null,online=false,connection="需要重新登录",error="登录已失效，请重新输入账号密码。")}}
-    private fun action(block:suspend()->Unit){if(_state.value.busy)return;viewModelScope.launch{_state.update{it.copy(busy=true,error=null,notice=null)};try{ready.await();block()}catch(e:CancellationException){throw e}catch(e:Exception){failure(e)}finally{_state.update{it.copy(busy=false)}}}}
+    private fun action(block:suspend()->Unit){if(_state.value.busy)return;viewModelScope.launch{_state.update{it.copy(busy=true,error=null,notice=null)};try{ready.await();block()}catch(e:CancellationException){throw e}catch(e:Exception){failure(e)}finally{_state.update{it.copy(busy=false,uploadProgress="")}}}}
     private suspend fun failure(e:Exception){if(e is DeviceApprovalRequired){_state.update{it.copy(deviceApprovalCode=e.verificationCode,error=null)};return;};if(e is BridgeException&&e.status==401&&_state.value.session!=null){expired();return};_state.update{it.copy(error=when(e){is BridgeException,is IllegalArgumentException,is IllegalStateException->e.message;else->"连接电脑失败，请确认电脑后台正在运行，手机与电脑网络互通。未确认的消息可用原编号重试。"})}}
     fun dismissError(){_state.update{it.copy(error=null,notice=null)}}
     fun login(address:String,username:String,password:String)=action {
@@ -77,7 +78,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
         require(health.str("authMode")=="password"&&health.optBoolean("deviceSecurity")){"请先更新电脑后台，启用账号密码登录。"}
         val session=client.login(username.trim(),password,android.os.Build.MODEL)
         val resume=foreground;stopObserving();foreground=resume;imageCache.evictAll();withContext(Dispatchers.IO){store.session(session)};api=BridgeApi(session);lastSeq=0
-        _state.update{ScreenState(loading=false,busy=true,session=session,loginAddress=normalized,pending=it.pending,notice="登录成功")};if(foreground)startObserving()
+        _state.update{ScreenState(loading=false,busy=true,session=session,loginAddress=normalized,pending=it.pending,incomingFiles=it.incomingFiles,importing=it.importing,notice="登录成功")};if(foreground)startObserving()
     }
     private suspend fun refreshQuiet(list:Boolean,history:Boolean=true){try{refresh(list,history)}catch(e:CancellationException){throw e}catch(e:Exception){if(e is BridgeException&&e.status==401)expired() else _state.update{it.copy(connection="无法刷新，正在重试")}}}
     private suspend fun refresh(list:Boolean,history:Boolean=true)=refreshLock.withLock {
@@ -102,21 +103,36 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     fun refreshNow()=action{refresh(true);_state.update{it.copy(notice="已刷新电脑上的聊天记录")}}
     fun moreChats()=action{val cursor=_state.value.chatCursor;if(cursor.isNotEmpty()){val result=api!!.request("/api/threads?cursor="+encode(cursor));_state.update{it.copy(chats=(it.chats+result.optJSONArray("threads")?.objects().orEmpty().map(BridgeCodec::chat)).distinctBy(Chat::id),chatCursor=result.str("nextCursor"))}}}
     fun open(chat:Chat)=action{openInternal(chat)}
-    private suspend fun openInternal(chat:Chat){rememberDraft();val draft=drafts[chat.id];_state.update{it.copy(selected=chat,entries=emptyList(),tasks=emptyList(),historyCursor="",draft=draft?.first.orEmpty(),photos=draft?.second.orEmpty())};withContext(Dispatchers.IO){store.lastChat(chat.id)};refresh(false)}
+    private suspend fun openInternal(chat:Chat){rememberDraft();val draft=drafts[chat.id];_state.update{it.copy(selected=chat,entries=emptyList(),tasks=emptyList(),historyCursor="",draft=draft?.first.orEmpty(),photos=draft?.second.orEmpty(),files=documentDrafts[documentKey(chat.id)].orEmpty())};withContext(Dispatchers.IO){store.lastChat(chat.id)};refresh(false)}
     private fun rememberDraft(){_state.value.selected?.id?.let{drafts[it]=_state.value.draft to _state.value.photos}}
     fun back(){rememberDraft();_state.update{it.copy(selected=null,entries=emptyList(),tasks=emptyList(),draft="",photos=emptyList())}}
-    fun create(name:String,cwd:String)=action{val result=api!!.request("/api/threads","POST",JSONObject().put("name",name.ifBlank{"手机聊天"}).put("cwd",cwd));val chat=BridgeCodec.chat(result);_state.update{it.copy(chats=listOf(chat)+it.chats)};openInternal(chat)}
+    fun create(name:String,cwd:String,attachIncoming:Boolean=false)=action{val result=api!!.request("/api/threads","POST",JSONObject().put("name",name.ifBlank{"手机聊天"}).put("cwd",cwd));val chat=BridgeCodec.chat(result);_state.update{it.copy(chats=listOf(chat)+it.chats)};openInternal(chat);if(attachIncoming)attachIncomingInternal()}
     fun moreHistory()=action{val chat=_state.value.selected?:return@action;val cursor=_state.value.historyCursor;if(cursor.isNotEmpty()){val result=api!!.request("/api/threads/${chat.id}/history?limit=20&cursor="+encode(cursor));if(_state.value.selected?.id==chat.id)_state.update{it.copy(entries=(BridgeCodec.history(result)+it.entries).distinctBy(Entry::id),historyCursor=result.str("nextCursor"))}}}
+    private fun documentKey(chatId:String)=api?.session?.address.orEmpty()+"|"+chatId
+    private suspend fun saveFiles(files:List<LocalDocument>){val chat=_state.value.selected?:return;val key=documentKey(chat.id);documentDrafts[key]=files;withContext(Dispatchers.IO){store.documentDraft(key,files)};_state.update{it.copy(files=files)}}
+    fun addDocuments(uris:List<Uri>)=action{val s=_state.value;require(s.selected!=null){"请先选择聊天。"};require(s.files.size+s.photos.size+uris.size<=8){"一条消息最多添加 8 个附件。"};val files=withContext(Dispatchers.IO){uris.map{prepareDocument(getApplication(),it)}};saveFiles(s.files+files)}
+    fun removeDocument(file:LocalDocument)=action{saveFiles(_state.value.files-file)}
+    fun importExternal(uris:List<Uri>,receipt:String){viewModelScope.launch{ready.await();incomingLock.withLock{
+        if(receipt in externalReceipts)return@withLock
+        _state.update{it.copy(importing=true,error=null)}
+        try{require(uris.isNotEmpty()){ "没有收到可读取的文件。请先下载文件，再通过“＋文件”选择。" };require(uris.size+_state.value.incomingFiles.size<=8){"最多暂存 8 个导入文件，请先处理已有文件。"}
+            val files=withContext(Dispatchers.IO){uris.map{prepareDocument(getApplication(),it)}};val combined=_state.value.incomingFiles+files
+            withContext(Dispatchers.IO){store.incoming(combined,receipt)};externalReceipts.add(receipt);_state.update{it.copy(incomingFiles=combined,notice="文件已接收，请选择要添加的对话")}
+        }catch(e:CancellationException){throw e}catch(e:Exception){_state.update{it.copy(error=e.message?:"文件导入失败，请用“＋文件”重新选择。")}}finally{_state.update{it.copy(importing=false)}}
+    }}}
+    fun discardIncoming()=action{incomingLock.withLock{withContext(Dispatchers.IO){store.incoming(emptyList())};_state.update{it.copy(incomingFiles=emptyList())}}}
+    fun openForIncoming(chat:Chat)=action{openInternal(chat);attachIncomingInternal()}
+    private suspend fun attachIncomingInternal()=incomingLock.withLock{val s=_state.value;require(s.photos.size+s.files.size+s.incomingFiles.size<=8){"目标聊天已有附件，合计不能超过 8 个。请移除部分附件或选择另一个对话。"};saveFiles(s.files+s.incomingFiles);withContext(Dispatchers.IO){store.incoming(emptyList())};_state.update{it.copy(incomingFiles=emptyList(),notice="文件已加入草稿，补充要求后点击发送")}}
     fun draft(text:String){if(text.length<=64000)_state.update{it.copy(draft=text)}}
     fun removePhoto(photo:Photo){_state.update{it.copy(photos=it.photos-photo)}}
-    fun addPhotos(uris:List<Uri>)=action{val count=8-_state.value.photos.size;val photos=withContext(Dispatchers.IO){uris.take(count).map{preparePhoto(getApplication(),it)}};_state.update{it.copy(photos=it.photos+photos)}}
+    fun addPhotos(uris:List<Uri>)=action{val count=8-_state.value.photos.size-_state.value.files.size;val photos=withContext(Dispatchers.IO){uris.take(count).map{preparePhoto(getApplication(),it)}};_state.update{it.copy(photos=it.photos+photos)}}
     private suspend fun persist(p:Pending?){withContext(Dispatchers.IO){store.pending(p)};_state.update{it.copy(pending=p)}}
     fun send()=action {
         val s=_state.value;val chat=s.selected?:return@action;val client=api?:return@action
-        val pending=s.pending?:run{require(s.draft.isNotBlank()||s.photos.isNotEmpty()){"请输入文字或选择图片。"};val created=Pending(UUID.randomUUID().toString(),client.session.address,chat.id,s.draft,s.photos.map(Photo::path));persist(created);created}
+        val pending=s.pending?:run{require(s.draft.isNotBlank()||s.photos.isNotEmpty()||s.files.isNotEmpty()){"请输入文字或选择图片。"};val created=Pending(UUID.randomUUID().toString(),client.session.address,chat.id,s.draft,s.photos.map(Photo::path),files=s.files);persist(created);created}
         require(pending.address==client.session.address&&pending.threadId==chat.id){"还有一条未确认的消息，请先打开它所属的聊天重试，或刷新检查结果。"}
-        MessageSender(client).send(pending,::persist){file->withContext(Dispatchers.IO){File(file).readBytes()}}
-        drafts.remove(chat.id);_state.update{it.copy(draft="",photos=emptyList(),notice="已交给电脑")};refreshQuiet(true)
+        MessageSender(client).send(pending,::persist,read={file->withContext(Dispatchers.IO){File(file).readBytes()}},progress={label->_state.update{it.copy(uploadProgress=label)}})
+        drafts.remove(chat.id);saveFiles(emptyList());_state.update{it.copy(draft="",photos=emptyList(),files=emptyList(),notice="已交给电脑")};refreshQuiet(true)
     }
     fun openPending()=action{val p=_state.value.pending?:return@action;require(p.address==api?.session?.address){"这条未确认消息属于另一台电脑。"};val chat=_state.value.chats.find{it.id==p.threadId}?:BridgeCodec.chat(api!!.request("/api/threads/${p.threadId}"));openInternal(chat)}
     fun abandonPending()=action{persist(null);_state.update{it.copy(notice="已放弃本机重试；电脑上已经收到的任务仍会继续。")}}
@@ -126,7 +142,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     fun loadDevices()=action{val result=api!!.request("/api/devices");_state.update{it.copy(devices=result.optJSONArray("devices")?.objects().orEmpty())}}
     fun revoke(id:String)=action{api!!.request("/api/devices/$id","DELETE");if(id==_state.value.session?.deviceId)forgetInternal() else {val result=api!!.request("/api/devices");_state.update{it.copy(devices=result.optJSONArray("devices")?.objects().orEmpty())}}}
     fun forget()=action{forgetInternal()}
-    private suspend fun forgetInternal(){val resume=foreground;stopObserving();foreground=resume;withContext(Dispatchers.IO){store.clear()};api=null;lastSeq=0;drafts.clear();imageCache.evictAll();_state.value=ScreenState(loading=false,notice="已移除本机连接信息；电脑任务不会因此停止。")}
+    private suspend fun forgetInternal(){val resume=foreground;stopObserving();foreground=resume;withContext(Dispatchers.IO){store.forgetConnection()};api=null;lastSeq=0;drafts.clear();documentDrafts.clear();imageCache.evictAll();_state.value=ScreenState(loading=false,incomingFiles=_state.value.incomingFiles,notice="已移除本机连接信息；电脑任务不会因此停止。")}
     private fun scheduleRefresh(){refreshJob?.cancel();refreshJob=viewModelScope.launch{delay(400);refreshQuiet(true)}}
     private fun handleEvent(e:JSONObject){
         val type=e.str("type");val data=e.optJSONObject("data")?:JSONObject()

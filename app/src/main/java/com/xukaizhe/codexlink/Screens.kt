@@ -37,8 +37,9 @@ import org.json.JSONObject
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun CodexApp(vm:BridgeViewModel,networkAllowed:Boolean,requestNetwork:()->Unit){
     val s by vm.state.collectAsState();val snack=remember{SnackbarHostState()}
-    var newChat by remember{mutableStateOf(false)};var settings by remember{mutableStateOf(false)}
+    var newChatForImport by remember{mutableStateOf(false)};var chooseIncoming by remember{mutableStateOf(false)};var newChat by remember{mutableStateOf(false)};var settings by remember{mutableStateOf(false)}
     var request by remember{mutableStateOf<JSONObject?>(null)};var confirm by remember{mutableStateOf("")}
+    LaunchedEffect(s.incomingFiles.map{it.id},s.session?.deviceId){if(s.incomingFiles.isNotEmpty()&&s.session!=null)chooseIncoming=true}
     LaunchedEffect(s.notice){s.notice?.let{snack.showSnackbar(it)}}
     LaunchedEffect(s.requests){request?.let{r->if(s.requests.none{it.str("id")==r.str("id")})request=null}}
     BackHandler(s.selected!=null){if(!s.busy)vm.back()}
@@ -68,14 +69,19 @@ import org.json.JSONObject
     ){padding->Column(Modifier.fillMaxSize().padding(padding)){
         if(!networkAllowed)Surface(color=MaterialTheme.colorScheme.secondaryContainer){Row(Modifier.fillMaxWidth().padding(12.dp),verticalAlignment=Alignment.CenterVertically){Text("需要允许访问局域网，才能连接电脑。",Modifier.weight(1f),style=MaterialTheme.typography.bodySmall);TextButton(onClick=requestNetwork){Text("允许访问")}}}
         s.error?.let{error->Surface(color=MaterialTheme.colorScheme.errorContainer){Row(Modifier.fillMaxWidth().padding(horizontal=16.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically){Text(error,Modifier.weight(1f),style=MaterialTheme.typography.bodySmall);TextButton(onClick=vm::dismissError){Text("知道了")}}}}
-        if(s.busy)LinearProgressIndicator(Modifier.fillMaxWidth())
+        if(s.incomingFiles.isNotEmpty())Surface(color=MaterialTheme.colorScheme.secondaryContainer){Column(Modifier.fillMaxWidth().padding(12.dp)){
+            Text("收到 "+s.incomingFiles.size+" 个待添加文件",fontWeight=FontWeight.Medium)
+            Row{if(s.session!=null)TextButton(onClick={chooseIncoming=true},enabled=!s.busy&&!s.importing){Text("选择对话")} else Text("连接电脑后可选择对话",style=MaterialTheme.typography.bodySmall);TextButton(onClick=vm::discardIncoming,enabled=!s.busy&&!s.importing){Text("取消导入")}}
+        }}
+        if(s.busy||s.importing)LinearProgressIndicator(Modifier.fillMaxWidth())
         when{ s.loading->Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator()}
             s.session==null->ConnectScreen(s,networkAllowed){address,username,password->if(networkAllowed)vm.login(address,username,password) else requestNetwork()}
             s.selected==null->ChatsScreen(s,vm,{newChat=true},{request=it})
             else->Conversation(s,vm,{request=it})
         }
     }}
-    if(newChat)NewChatDialog(s,{newChat=false}){name,cwd->newChat=false;vm.create(name,cwd)}
+    if(chooseIncoming&&s.session!=null&&s.incomingFiles.isNotEmpty()&&!newChat)IncomingFilesDialog(s,{chat->chooseIncoming=false;vm.openForIncoming(chat)},{chooseIncoming=false;newChatForImport=true;newChat=true},vm::moreChats){chooseIncoming=false}
+    if(newChat)NewChatDialog(s,{newChat=false;if(newChatForImport)chooseIncoming=true;newChatForImport=false}){name,cwd->val attach=newChatForImport;newChat=false;newChatForImport=false;vm.create(name,cwd,attach)}
     if(settings)SettingsDialog(s,vm,{settings=false}){confirm="forget"}
     request?.let{ApprovalDialog(it,s.busy,{request=null}){body->vm.respond(it.str("id"),body)}}
     if(confirm.isNotEmpty())AlertDialog(onDismissRequest={confirm=""},title={Text(when(confirm){"release"->"交回电脑";"abandon"->"放弃本机重试？";else->"移除这台电脑？"})},text={Text(when(confirm){"release"->"手机任务全部结束后，会释放后台使用的聊天。之后可在桌面版继续同一个聊天。";"abandon"->"这只会移除手机上的重试记录，不会停止电脑可能已经收到的任务。建议先刷新聊天确认结果。";else->"移除手机保存的连接信息。电脑上已经开始的任务仍会继续；下次需要重新登录。"})},confirmButton={TextButton(onClick={when(confirm){"release"->vm.release();"abandon"->vm.abandonPending();else->{settings=false;vm.forget()}};confirm=""}){Text("确认")}},dismissButton={TextButton(onClick={confirm=""}){Text("取消")}})
@@ -96,7 +102,7 @@ import org.json.JSONObject
             Button(onClick={login(address,username,password)},enabled=!s.busy&&address.isNotBlank()&&username.isNotBlank()&&password.isNotEmpty(),shape=RoundedCornerShape(14.dp),modifier=Modifier.fillMaxWidth().height(52.dp).testTag("login")){Text(if(!networkAllowed)"允许访问并连接" else if(s.deviceApprovalCode!=null)"已在电脑批准，重新登录" else "连接电脑",fontWeight=FontWeight.Bold)}
         }}
         Text("填写电脑后台提供的地址。登录后会安全保存连接凭据，不需要每次输入密码。外网使用 HTTPS 地址。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary,lineHeight=21.sp)
-        Text("个人使用 · v0.3.1",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
+        Text("个人使用 · v0.4.0",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
     }
 }
 @Composable private fun ChatsScreen(s:ScreenState,vm:BridgeViewModel,newChat:()->Unit,request:(JSONObject)->Unit){
@@ -134,18 +140,22 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
     if(entry.role=="tool"){var expanded by remember(entry.id){mutableStateOf(false)};Surface(shape=RoundedCornerShape(14.dp),color=MaterialTheme.colorScheme.surfaceVariant){Column(Modifier.fillMaxWidth().clickable{expanded=!expanded}.padding(14.dp)){Text((if(expanded)"▾  " else "▸  ")+entry.text,style=MaterialTheme.typography.labelLarge);if(expanded)SelectionContainer{Text(entry.detail.takeLast(60000),fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(top=10.dp))}}};return}
     val user=entry.role=="user";Column(Modifier.fillMaxWidth(),horizontalAlignment=if(user)Alignment.End else Alignment.Start){Text(if(user)"你" else "CODEX",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary,modifier=Modifier.padding(horizontal=4.dp,vertical=5.dp));Surface(shape=RoundedCornerShape(18.dp),color=if(user)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,modifier=Modifier.widthIn(max=600.dp)){
         Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
-            if(entry.text.isNotEmpty()||entry.images.isEmpty())SelectionContainer{Text(entry.text.ifEmpty{if(entry.live)"正在回复…" else " "},style=MaterialTheme.typography.bodyLarge,lineHeight=25.sp)}
+            if(entry.text.isNotEmpty()||(entry.images.isEmpty()&&entry.files.isEmpty()))SelectionContainer{Text(entry.text.ifEmpty{if(entry.live)"正在回复…" else " "},style=MaterialTheme.typography.bodyLarge,lineHeight=25.sp)}
             entry.images.forEach{photo->HistoryImage(photo,vm){openImage(photo)}}
+            entry.files.forEach{FileCard(it)}
         }
     }}
 }
 @Composable private fun Composer(s:ScreenState,vm:BridgeViewModel,networkAllowed:Boolean,requestNetwork:()->Unit,abandon:()->Unit){
+    val documents=rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()){if(it.isNotEmpty())vm.addDocuments(it)}
     val picker=rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(8)){if(it.isNotEmpty())vm.addPhotos(it)}
     Surface(shadowElevation=3.dp,color=MaterialTheme.colorScheme.surface){Column(Modifier.navigationBarsPadding().imePadding().padding(horizontal=16.dp,vertical=10.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
         s.pending?.let{p->Column{Text("有一条消息尚未确认，重试会使用原编号。",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.primary);Row{TextButton(onClick={if(p.threadId==s.selected?.id&&p.address==s.session?.address)vm.send() else vm.openPending()},enabled=!s.busy){Text(if(p.threadId==s.selected?.id)"重试原消息" else "打开原聊天")};TextButton(onClick=abandon,enabled=!s.busy){Text("放弃重试")}}}}
         if(s.photos.isNotEmpty())LazyRow(horizontalArrangement=Arrangement.spacedBy(8.dp)){items(s.photos,key=Photo::path){photo->Column{val bitmap by produceState<android.graphics.Bitmap?>(null,photo.path){value=withContext(Dispatchers.IO){BitmapFactory.decodeFile(photo.path,BitmapFactory.Options().apply{inSampleSize=4})}};bitmap?.let{Image(it.asImageBitmap(),"待发送图片",Modifier.size(66.dp))};TextButton(onClick={vm.removePhoto(photo)},enabled=!s.busy&&s.pending==null){Text("移除",style=MaterialTheme.typography.labelSmall)}}}}
+        s.files.forEach{file->Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text("文件 · "+file.name,maxLines=2,overflow=TextOverflow.Ellipsis,style=MaterialTheme.typography.bodyMedium);Text(fileSize(file.size),style=MaterialTheme.typography.labelSmall)};TextButton(onClick={vm.removeDocument(file)},enabled=!s.busy&&s.pending==null){Text("移除")}}}
+        if(s.uploadProgress.isNotBlank())Text(s.uploadProgress,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.primary)
         OutlinedTextField(s.draft,vm::draft,placeholder={Text("给 Codex 发消息…")},enabled=!s.busy&&s.pending==null,maxLines=5,shape=RoundedCornerShape(16.dp),modifier=Modifier.fillMaxWidth().testTag("draft"))
-        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){TextButton(onClick={picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))},enabled=!s.busy&&s.pending==null&&s.photos.size<8){Text("＋ 图片")};Spacer(Modifier.weight(1f));Button(onClick={if(networkAllowed)vm.send() else requestNetwork()},enabled=!s.busy&&s.pending==null&&(s.draft.isNotBlank()||s.photos.isNotEmpty()),shape=RoundedCornerShape(12.dp),modifier=Modifier.testTag("send")){Text("发送 ↑")}}
+        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){TextButton(onClick={picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))},enabled=!s.busy&&s.pending==null&&s.photos.size+s.files.size<8){Text("＋ 图片")};TextButton(onClick={documents.launch(arrayOf("*/*"))},enabled=!s.busy&&!s.importing&&s.pending==null&&s.photos.size+s.files.size<8){Text("＋ 文件")};Spacer(Modifier.weight(1f));Button(onClick={if(networkAllowed)vm.send() else requestNetwork()},enabled=!s.busy&&s.pending==null&&(s.draft.isNotBlank()||s.photos.isNotEmpty()||s.files.isNotEmpty()),shape=RoundedCornerShape(12.dp),modifier=Modifier.testTag("send")){Text("发送 ↑")}}
     }}
 }
 @Composable private fun NewChatDialog(s:ScreenState,dismiss:()->Unit,create:(String,String)->Unit){var name by rememberSaveable{mutableStateOf("")};var workspace by rememberSaveable{mutableStateOf(s.workspaces.firstOrNull().orEmpty())}
@@ -170,7 +180,7 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
                 }
                 Text("关闭手机应用不会停止电脑任务。重新打开后会自动连接，刷新即可查看结果。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)
                 TextButton(onClick=forget,enabled=!s.busy){Text("移除本机连接信息")}
-                Text("掌上 Codex · 0.3.1",style=MaterialTheme.typography.labelSmall)
+                Text("掌上 Codex · 0.4.0",style=MaterialTheme.typography.labelSmall)
             }
         },
         confirmButton={TextButton(onClick=dismiss){Text("完成")}}
