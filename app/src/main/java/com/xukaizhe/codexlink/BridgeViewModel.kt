@@ -249,7 +249,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
             "job.updated"->{val task=BridgeCodec.task(data);if(task.threadId==_state.value.selected?.id)_state.update{it.copy(tasks=(listOf(task)+it.tasks.filterNot{old->old.id==task.id}))};if(!task.active)scheduleRefresh()}
             "thread.event"->{if(data.str("threadId")!=_state.value.selected?.id)return;val turn=data.str("turnId");val method=data.str("method")
                 when(method){
-                    "item/agentMessage/delta"->{val id="$turn:${data.str("itemId")}";_state.update{s->val old=s.entries.find{it.id==id};val entry=Entry(id,turn,"assistant",old?.text.orEmpty()+data.str("delta"),live=true);s.copy(entries=if(old==null)s.entries+entry else s.entries.map{if(it.id==id)entry else it})}}
+                    "item/agentMessage/delta"->{val id="$turn:${data.str("itemId")}";_state.update{s->val old=s.entries.find{it.id==id};val entry=old?.copy(text=old.text+data.str("delta"),live=true)?:Entry(id,turn,"assistant",data.str("delta"),live=true);s.copy(entries=if(old==null)s.entries+entry else s.entries.map{if(it.id==id)entry else it})}}
                     "item/started","item/completed"->{val item=data.optJSONObject("item")?:return;val entry=BridgeCodec.item(turn,item)?:return;_state.update{s->s.copy(entries=if(s.entries.none{it.id==entry.id})s.entries+entry else s.entries.map{if(it.id==entry.id)entry else it})}}
                     "item/commandExecution/outputDelta"->{val id="$turn:${data.str("itemId")}";_state.update{s->s.copy(entries=s.entries.map{if(it.id==id)it.copy(detail=(it.detail+data.str("delta")).takeLast(100000)) else it})}}
                     "turn/completed"->scheduleRefresh()

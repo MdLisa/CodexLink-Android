@@ -105,7 +105,7 @@ import org.json.JSONObject
             Button(onClick={login(address,username,password)},enabled=!s.busy&&address.isNotBlank()&&username.isNotBlank()&&password.isNotEmpty(),shape=RoundedCornerShape(14.dp),modifier=Modifier.fillMaxWidth().height(52.dp).testTag("login")){Text(if(!networkAllowed)"允许访问并连接" else if(s.deviceApprovalCode!=null)"已在电脑批准，重新登录" else "连接电脑",fontWeight=FontWeight.Bold)}
         }}
         Text("填写电脑后台提供的地址。登录后会安全保存连接凭据，不需要每次输入密码。外网使用 HTTPS 地址。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary,lineHeight=21.sp)
-        Text("个人使用 · v0.9.1",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
+        Text("个人使用 · v0.9.2",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
     }
 }
 @Composable private fun ChatsScreen(s:ScreenState,vm:BridgeViewModel,newChat:()->Unit,request:(JSONObject)->Unit){
@@ -133,6 +133,7 @@ private fun folder(path:String)=path.trimEnd('\\','/').substringAfterLast('\\').
 @Composable private fun Info(title:String,body:String,button:String?=null,action:()->Unit={}){Surface(shape=RoundedCornerShape(16.dp),color=MaterialTheme.colorScheme.primaryContainer){Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){Text(title,fontWeight=FontWeight.SemiBold);Text(body,style=MaterialTheme.typography.bodySmall);if(button!=null)TextButton(onClick=action){Text(button)}}}}
 @Composable private fun RequestBanner(r:JSONObject,action:()->Unit){Card(onClick=action,colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.tertiaryContainer),modifier=Modifier.fillMaxWidth()){Row(Modifier.padding(16.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(if(r.str("method").endsWith("requestUserInput"))"Codex 需要你回答" else "有一项操作需要授权",fontWeight=FontWeight.SemiBold);Text("查看具体内容后，再决定是否继续",style=MaterialTheme.typography.bodySmall)};Text("查看 ›")}}}
 @Composable private fun Conversation(s:ScreenState,vm:BridgeViewModel,request:(JSONObject)->Unit){
+    val dates=messageDates(s.entries)
     val list=rememberLazyListState();var follow by remember(s.selected?.id){mutableStateOf(true)}
     var preview by remember(s.selected?.id,s.session?.address,s.session?.deviceId){mutableStateOf<ImageAttachment?>(null)}
     LaunchedEffect(list.isScrollInProgress){if(list.isScrollInProgress)follow=list.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let{it>=list.layoutInfo.totalItemsCount-2}?:true}
@@ -140,7 +141,10 @@ private fun folder(path:String)=path.trimEnd('\\','/').substringAfterLast('\\').
     LazyColumn(state=list,modifier=Modifier.fillMaxSize(),contentPadding=PaddingValues(horizontal=16.dp,vertical=12.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
         if(s.historyCursor.isNotEmpty())item{TextButton(onClick=vm::moreHistory,enabled=!s.busy,modifier=Modifier.fillMaxWidth()){Text("加载更早的消息")}}
         if(s.entries.isEmpty())item{Column(Modifier.fillMaxWidth().padding(vertical=44.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)){Text(">_",fontSize=36.sp,fontFamily=FontFamily.Monospace,color=MaterialTheme.colorScheme.primary);Text(if(s.selected?.sharedReadOnly==true)"这个会话还没有消息" else if(s.approvalSettings.chatOnly)"想聊什么？" else "想让电脑做什么？",style=MaterialTheme.typography.titleLarge);Text(if(s.selected?.sharedReadOnly==true)"对方发送消息后，刷新即可查看。" else "发一条消息，或附上一张图片。",color=MaterialTheme.colorScheme.secondary)}}
-        items(s.entries,key=Entry::id){entry->Message(entry,vm){preview=it}}
+        items(s.entries,key=Entry::id){entry->Column(Modifier.fillMaxWidth()){
+            dates[entry.id]?.let{date->Text(date,Modifier.align(Alignment.CenterHorizontally).padding(vertical=8.dp),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)}
+            Message(entry,vm){preview=it}
+        }}
         items(s.tasks.filter{it.active||it.state=="needsReview"||it.state=="failed"}.take(8),key={"job:"+it.id}){task->Surface(shape=RoundedCornerShape(14.dp),color=MaterialTheme.colorScheme.surfaceVariant){Row(Modifier.fillMaxWidth().padding(14.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(taskLabel(task.state),fontWeight=FontWeight.Medium);if(task.approvalsReviewer.isNotEmpty())Text("本任务审批："+approvalLabel(task.approvalsReviewer),style=MaterialTheme.typography.bodySmall);if(task.error.isNotBlank())Text(task.error,style=MaterialTheme.typography.bodySmall)};if(task.active)TextButton(onClick={vm.stop(task)},enabled=!s.busy){Text(if(task.state=="queued")"取消排队" else "停止")}}}}
         items(s.requests.filter{it.str("threadId")==s.selected?.id},key={"req:"+it.str("id")}){r->RequestBanner(r){request(r)}}
         item{Spacer(Modifier.height(4.dp))}
@@ -159,8 +163,20 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
             }
             entry.images.forEach{photo->HistoryImage(photo,vm){openImage(photo)}}
             entry.files.forEach{FileCard(it)}
+            MessageTimeStamp(entry,Modifier.align(Alignment.End))
         }
     }}
+}
+@Composable private fun MessageTimeStamp(entry:Entry,modifier:Modifier=Modifier){
+    var showDetails by remember(entry.id){mutableStateOf(false)}
+    val fullTime=entry.fullTimeLabel()
+    Box(modifier.sizeIn(minWidth=48.dp,minHeight=32.dp).clickable(enabled=fullTime!=null,onClickLabel="查看完整日期和时间"){showDetails=true}.testTag("messageTime"),contentAlignment=Alignment.CenterEnd){
+        Text(entry.timeLabel(),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
+    }
+    if(showDetails&&fullTime!=null)AlertDialog(onDismissRequest={showDetails=false},title={Text("消息时间")},text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)){
+        SelectionContainer{Text(fullTime)}
+        Text("按手机本地时区显示",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)
+    }},confirmButton={TextButton(onClick={showDetails=false}){Text("知道了")}})
 }
 @Composable private fun Composer(s:ScreenState,vm:BridgeViewModel,networkAllowed:Boolean,requestNetwork:()->Unit,abandon:()->Unit){
     val documents=rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()){if(it.isNotEmpty())vm.addDocuments(it)}
@@ -212,7 +228,7 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
                 }
                 Text("关闭手机应用不会停止电脑任务。重新打开后会自动连接，刷新即可查看结果。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)
                 TextButton(onClick=forget,enabled=!s.busy){Text("移除本机连接信息")}
-                Text("掌上 Codex · 0.9.1",style=MaterialTheme.typography.labelSmall)
+                Text("掌上 Codex · 0.9.2",style=MaterialTheme.typography.labelSmall)
             }
         },
         confirmButton={TextButton(onClick=dismiss){Text("完成")}}

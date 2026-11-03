@@ -23,7 +23,7 @@ data class Chat(val id: String, val name: String, val cwd: String, val control: 
     val ownerLabel get()=listOf(ownerName.ifBlank{"其他手机"},ownerCode).filter{it.isNotBlank()}.joinToString(" · ")
 }
 data class ImageAttachment(val id: String, val mime: String = "", val available: Boolean = false)
-data class Entry(val id: String, val turnId: String, val role: String, val text: String, val detail: String = "", val live: Boolean = false, val images: List<ImageAttachment> = emptyList(),val files:List<FileAttachment> = emptyList())
+data class Entry(val id: String, val turnId: String, val role: String, val text: String, val detail: String = "", val live: Boolean = false, val images: List<ImageAttachment> = emptyList(),val files:List<FileAttachment> = emptyList(),val startedAtMs:Long?=null,val completedAtMs:Long?=null)
 fun validImageId(id: String) = Regex("[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}").matches(id)
 data class Task(val id: String, val threadId: String, val state: String, val turnId: String, val error: String, val approvalsReviewer: String = "") {
     val active get() = state in setOf("queued", "starting", "running", "waitingApproval")
@@ -41,7 +41,7 @@ object BridgeCodec {
     fun task(j: JSONObject) = Task(j.str("id"), j.str("threadId"), j.str("state"), j.str("turnId"), j.str("error"), j.str("approvalsReviewer"))
     fun item(turnId: String, j: JSONObject): Entry? {
         val key = "$turnId:${j.str("id")}"; val type = j.str("type")
-        return when (type) {
+        val entry=when (type) {
             "agentMessage" -> Entry(key, turnId, "assistant", j.str("text"))
             "userMessage" -> {
                 val content=j.optJSONArray("content")?.objects().orEmpty()
@@ -57,6 +57,7 @@ object BridgeCodec {
             "webSearch" -> Entry(key, turnId, "tool", "联网搜索", j.str("query"))
             else -> null
         }
+        return entry?.copy(startedAtMs=j.messageMillis("startedAtMs"),completedAtMs=j.messageMillis("completedAtMs"))
     }
     fun history(j: JSONObject): List<Entry> = j.optJSONArray("turns")?.objects().orEmpty().asReversed().flatMap { turn -> turn.optJSONArray("items")?.objects().orEmpty().mapNotNull { item(turn.str("id"), it) } }
 }
