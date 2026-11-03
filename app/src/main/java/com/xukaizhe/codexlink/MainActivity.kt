@@ -16,11 +16,13 @@ import com.xukaizhe.codexlink.ui.theme.CodexLinkTheme
 
 class MainActivity : ComponentActivity() {
     private lateinit var model: BridgeViewModel
+    private lateinit var updates: AppUpdateViewModel
     private var importReceipt:String?=null
     private var networkAllowed by mutableStateOf(Build.VERSION.SDK_INT < 37)
     private val permission=registerForActivityResult(ActivityResultContracts.RequestPermission()){allowed->networkAllowed=allowed;if(allowed)model.startObserving()}
     override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState);enableEdgeToEdge();model=ViewModelProvider(this)[BridgeViewModel::class.java];checkPermission();receiveFileIntent(intent,savedInstanceState?.getString("importReceipt"))
-        setContent{CodexLinkTheme{CodexApp(model,networkAllowed){permission.launch("android.permission.ACCESS_LOCAL_NETWORK")}}}
+        updates=ViewModelProvider(this)[AppUpdateViewModel::class.java]
+        setContent{CodexLinkTheme{CodexApp(model,networkAllowed,{updates.check()}){permission.launch("android.permission.ACCESS_LOCAL_NETWORK")};AppUpdateDialog(updates)}}
     }
     @Suppress("DEPRECATION")
     private fun receiveFileIntent(source:Intent?,restoredReceipt:String?=null){
@@ -40,6 +42,6 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent:Intent){super.onNewIntent(intent);setIntent(intent);receiveFileIntent(intent)}
     override fun onSaveInstanceState(outState:Bundle){outState.putString("importReceipt",importReceipt);super.onSaveInstanceState(outState)}
     private fun checkPermission(){networkAllowed=Build.VERSION.SDK_INT<37||checkSelfPermission("android.permission.ACCESS_LOCAL_NETWORK")==PackageManager.PERMISSION_GRANTED}
-    override fun onStart(){super.onStart();checkPermission();if(networkAllowed)model.startObserving()}
+    override fun onStart(){super.onStart();checkPermission();if(networkAllowed)model.startObserving();updates.onForeground()}
     override fun onStop(){model.stopObserving();super.onStop()}
 }

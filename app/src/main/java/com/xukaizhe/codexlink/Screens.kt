@@ -35,7 +35,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable fun CodexApp(vm:BridgeViewModel,networkAllowed:Boolean,requestNetwork:()->Unit){
+@Composable fun CodexApp(vm:BridgeViewModel,networkAllowed:Boolean,checkUpdate:()->Unit={},requestNetwork:()->Unit){
     val s by vm.state.collectAsState();val snack=remember{SnackbarHostState()}
     var newChatForImport by remember{mutableStateOf(false)};var chooseIncoming by remember{mutableStateOf(false)};var newChat by remember{mutableStateOf(false)};var settings by remember{mutableStateOf(false)}
     var request by remember{mutableStateOf<JSONObject?>(null)};var confirm by remember{mutableStateOf("")}
@@ -77,14 +77,14 @@ import org.json.JSONObject
         if(s.busy||s.importing)LinearProgressIndicator(Modifier.fillMaxWidth())
         if(s.takeoverProgress.isNotEmpty())Text(s.takeoverProgress,Modifier.padding(horizontal=16.dp,vertical=8.dp),style=MaterialTheme.typography.bodySmall)
         when{ s.loading->Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator()}
-            s.session==null->ConnectScreen(s,networkAllowed){address,username,password->if(networkAllowed)vm.login(address,username,password) else requestNetwork()}
+            s.session==null->Column(Modifier.weight(1f)){Box(Modifier.weight(1f)){ConnectScreen(s,networkAllowed){address,username,password->if(networkAllowed)vm.login(address,username,password) else requestNetwork()}};TextButton(onClick=checkUpdate,modifier=Modifier.align(Alignment.CenterHorizontally)){Text("检查更新")}}
             s.selected==null->ChatsScreen(s,vm,{newChat=true},{request=it})
             else->Conversation(s,vm,{request=it})
         }
     }}
     if(!s.approvalSettings.chatOnly&&chooseIncoming&&s.session!=null&&s.incomingFiles.isNotEmpty()&&!newChat)IncomingFilesDialog(s,{chat->chooseIncoming=false;vm.openForIncoming(chat)},{chooseIncoming=false;newChatForImport=true;newChat=true},vm::moreChats){chooseIncoming=false}
     if(newChat)NewChatDialog(s,{newChat=false;if(newChatForImport)chooseIncoming=true;newChatForImport=false}){name,cwd->val attach=newChatForImport;newChat=false;newChatForImport=false;vm.create(name,cwd,attach)}
-    if(settings)SettingsDialog(s,vm,{settings=false}){confirm="forget"}
+    if(settings)SettingsDialog(s,vm,{settings=false},{settings=false;checkUpdate()}){confirm="forget"}
     s.takeoverPlan?.let{plan->AlertDialog(onDismissRequest=vm::dismissTakeover,title={Text("退出电脑端并接管？")},text={Text("将请求退出电脑上的 ${plan.desktopCount} 个 Codex 桌面实例，可能中断其全部会话任务。已完成的文件修改不会撤销。\n\n退出后尝试接管当前原会话，不复制聊天，不自动重发消息。若电脑端未能正常退出，会报告失败，不强杀进程。\n\n关闭手机不会取消已经确认的接管操作。")},confirmButton={TextButton(onClick=vm::confirmTakeover,enabled=!s.busy){Text("退出电脑端并接管")}},dismissButton={TextButton(onClick=vm::dismissTakeover){Text("取消")}})}
     request?.let{ApprovalDialog(it,s.busy,{request=null}){body->vm.respond(it.str("id"),body)}}
     if(confirm.isNotEmpty())AlertDialog(onDismissRequest={confirm=""},title={Text(when(confirm){"release"->"交回电脑";"abandon"->"放弃本机重试？";else->"移除这台电脑？"})},text={Text(when(confirm){"release"->"手机任务全部结束后，会释放后台使用的聊天。之后可在桌面版继续同一个聊天。";"abandon"->"这只会移除手机上的重试记录，不会停止电脑可能已经收到的任务。建议先刷新聊天确认结果。";else->"移除手机保存的连接信息。电脑上已经开始的任务仍会继续；下次需要重新登录。"})},confirmButton={TextButton(onClick={when(confirm){"release"->vm.release();"abandon"->vm.abandonPending();else->{settings=false;vm.forget()}};confirm=""}){Text("确认")}},dismissButton={TextButton(onClick={confirm=""}){Text("取消")}})
@@ -105,7 +105,7 @@ import org.json.JSONObject
             Button(onClick={login(address,username,password)},enabled=!s.busy&&address.isNotBlank()&&username.isNotBlank()&&password.isNotEmpty(),shape=RoundedCornerShape(14.dp),modifier=Modifier.fillMaxWidth().height(52.dp).testTag("login")){Text(if(!networkAllowed)"允许访问并连接" else if(s.deviceApprovalCode!=null)"已在电脑批准，重新登录" else "连接电脑",fontWeight=FontWeight.Bold)}
         }}
         Text("填写电脑后台提供的地址。登录后会安全保存连接凭据，不需要每次输入密码。外网使用 HTTPS 地址。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary,lineHeight=21.sp)
-        Text("个人使用 · v0.9.2",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
+        Text("个人使用 · v0.10.1",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
     }
 }
 @Composable private fun ChatsScreen(s:ScreenState,vm:BridgeViewModel,newChat:()->Unit,request:(JSONObject)->Unit){
@@ -197,7 +197,7 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
         else{Text(if(s.projectScope.all)"项目范围：所有目录" else "选择电脑上的项目",style=MaterialTheme.typography.labelLarge);s.workspaces.forEach{path->Surface(onClick={workspace=path},color=if(path==workspace)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,shape=RoundedCornerShape(12.dp)){Column(Modifier.fillMaxWidth().padding(12.dp)){Text(folder(path),fontWeight=FontWeight.Medium);Text(path,style=MaterialTheme.typography.bodySmall)}}};if(s.projectScope.all)OutlinedTextField(workspace,{workspace=it.take(1000)},label={Text("项目完整路径")},modifier=Modifier.fillMaxWidth().testTag("workspacePath"))}
     }},confirmButton={TextButton(onClick={create(name,workspace.trim())},enabled=(s.approvalSettings.chatOnly||workspace.isNotBlank())&&s.online){Text("创建")}},dismissButton={TextButton(onClick=dismiss){Text("取消")}})
 }
-@Composable private fun SettingsDialog(s:ScreenState,vm:BridgeViewModel,dismiss:()->Unit,forget:()->Unit){var revoke by remember{mutableStateOf<String?>(null)}
+@Composable private fun SettingsDialog(s:ScreenState,vm:BridgeViewModel,dismiss:()->Unit,checkUpdate:()->Unit,forget:()->Unit){var revoke by remember{mutableStateOf<String?>(null)}
     AlertDialog(
         onDismissRequest=dismiss,
         title={Text("电脑连接")},
@@ -228,7 +228,8 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
                 }
                 Text("关闭手机应用不会停止电脑任务。重新打开后会自动连接，刷新即可查看结果。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)
                 TextButton(onClick=forget,enabled=!s.busy){Text("移除本机连接信息")}
-                Text("掌上 Codex · 0.9.2",style=MaterialTheme.typography.labelSmall)
+                TextButton(onClick=checkUpdate){Text("检查更新")}
+                Text("掌上 Codex · 0.10.1",style=MaterialTheme.typography.labelSmall)
             }
         },
         confirmButton={TextButton(onClick=dismiss){Text("完成")}}

@@ -44,3 +44,4 @@ Thumbs.db
 Desktop.ini
 
 # Keep Gradle wrapper scripts, gradle-wrapper.jar, version catalogs and lockfiles.
+/LOCAL_DEVELOPMENT.md
