@@ -49,7 +49,7 @@ import org.json.JSONObject
                 TopAppBar(
                     title={Column{
                         Text(s.selected?.name?:"掌上 Codex",maxLines=1,overflow=TextOverflow.Ellipsis,fontWeight=FontWeight.SemiBold)
-                        Text((if(s.approvalSettings.chatOnly)"仅聊天 · " else "")+s.connection,style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary)
+                        Text((if(s.browsingShared)"其他手机 · 只读 · " else if(s.approvalSettings.chatOnly)"仅聊天 · " else "")+s.connection,style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary)
                     }},
                     navigationIcon={if(s.selected!=null)TextButton(onClick=vm::back,enabled=!s.busy){Text("返回")}},
                     actions={
@@ -59,14 +59,14 @@ import org.json.JSONObject
                 )
                 if(s.selected!=null)Surface(color=MaterialTheme.colorScheme.surface){
                     Row(Modifier.fillMaxWidth().padding(horizontal=16.dp,vertical=4.dp),verticalAlignment=Alignment.CenterVertically){
-                        Text(folder(s.selected!!.cwd),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.weight(1f))
-                        if(!s.approvalSettings.chatOnly&&s.selected?.control!="bridge")FilledTonalButton(onClick=vm::prepareTakeover,enabled=!s.busy&&s.online,modifier=Modifier.testTag("takeOverChat")){Text("接管会话")}
-                        if(!s.approvalSettings.chatOnly)FilledTonalButton(onClick={confirm="release"},enabled=!s.busy,modifier=Modifier.testTag("releaseToDesktop")){Text("交回电脑")}
+                        Text(if(s.selected!!.sharedReadOnly)"只读 · "+s.selected!!.ownerLabel else folder(s.selected!!.cwd),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary,maxLines=2,overflow=TextOverflow.Ellipsis,modifier=Modifier.weight(1f))
+                        if(!s.selected!!.sharedReadOnly&&!s.approvalSettings.chatOnly&&s.selected?.control!="bridge")FilledTonalButton(onClick=vm::prepareTakeover,enabled=!s.busy&&s.online,modifier=Modifier.testTag("takeOverChat")){Text("接管会话")}
+                        if(!s.selected!!.sharedReadOnly&&!s.approvalSettings.chatOnly)FilledTonalButton(onClick={confirm="release"},enabled=!s.busy,modifier=Modifier.testTag("releaseToDesktop")){Text("交回电脑")}
                     }
                 }
             }
         },
-        bottomBar={if(s.session!=null&&s.selected!=null)Composer(s,vm,networkAllowed,requestNetwork){confirm="abandon"}}
+        bottomBar={if(s.session!=null&&s.selected!=null){if(s.selected!!.sharedReadOnly)Surface{Text("只读查看 · 不能发送消息、操作任务或修改会话",Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),style=MaterialTheme.typography.bodySmall)}else Composer(s,vm,networkAllowed,requestNetwork){confirm="abandon"}}}
     ){padding->Column(Modifier.fillMaxSize().padding(padding)){
         if(!networkAllowed)Surface(color=MaterialTheme.colorScheme.secondaryContainer){Row(Modifier.fillMaxWidth().padding(12.dp),verticalAlignment=Alignment.CenterVertically){Text("需要允许访问局域网，才能连接电脑。",Modifier.weight(1f),style=MaterialTheme.typography.bodySmall);TextButton(onClick=requestNetwork){Text("允许访问")}}}
         s.error?.let{error->Surface(color=MaterialTheme.colorScheme.errorContainer){Row(Modifier.fillMaxWidth().padding(horizontal=16.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically){Text(error,Modifier.weight(1f),style=MaterialTheme.typography.bodySmall);TextButton(onClick=vm::dismissError){Text("知道了")}}}}
@@ -105,14 +105,15 @@ import org.json.JSONObject
             Button(onClick={login(address,username,password)},enabled=!s.busy&&address.isNotBlank()&&username.isNotBlank()&&password.isNotEmpty(),shape=RoundedCornerShape(14.dp),modifier=Modifier.fillMaxWidth().height(52.dp).testTag("login")){Text(if(!networkAllowed)"允许访问并连接" else if(s.deviceApprovalCode!=null)"已在电脑批准，重新登录" else "连接电脑",fontWeight=FontWeight.Bold)}
         }}
         Text("填写电脑后台提供的地址。登录后会安全保存连接凭据，不需要每次输入密码。外网使用 HTTPS 地址。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary,lineHeight=21.sp)
-        Text("个人使用 · v0.9.0",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
+        Text("个人使用 · v0.9.1",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary)
     }
 }
 @Composable private fun ChatsScreen(s:ScreenState,vm:BridgeViewModel,newChat:()->Unit,request:(JSONObject)->Unit){
     val searching=s.chatSearch.isNotBlank();val chats=if(searching)s.searchResults else s.chats
     LazyColumn(contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp),modifier=Modifier.fillMaxSize()){
-        item{Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text("你的聊天",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold);Text(if(s.approvalSettings.chatOnly)"仅聊天 · 允许联网和题目图片" else "电脑与手机，共用聊天记录",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)};FilledTonalButton(onClick=newChat,enabled=!s.busy&&s.online,modifier=Modifier.testTag("newChat")){Text("＋ 新建")}}}
-        item{OutlinedTextField(value=s.chatSearch,onValueChange=vm::searchChats,label={Text("搜索聊天")},placeholder={Text(if(s.approvalSettings.chatOnly)"聊天名称" else "聊天名称或项目路径")},singleLine=true,enabled=!s.busy,trailingIcon={if(s.chatSearch.isNotEmpty())TextButton(onClick={vm.searchChats("")}){Text("清空")}},modifier=Modifier.fillMaxWidth().testTag("chatSearch"))}
+        if(s.sharedChatAccess.enabled)item{Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){FilterChip(selected=!s.browsingShared,onClick={vm.browseShared(false)},enabled=!s.busy,label={Text("我的聊天")});FilterChip(selected=s.browsingShared,onClick={vm.browseShared(true)},enabled=!s.busy,label={Text("其他手机 · 只读")},modifier=Modifier.testTag("sharedChats"))}}
+        item{Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(if(s.browsingShared)"其他手机的聊天" else "你的聊天",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold);Text(if(s.browsingShared)"仅聊天会话 · 只读查看" else if(s.approvalSettings.chatOnly)"仅聊天 · 允许联网和题目图片" else "电脑与手机，共用聊天记录",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)};if(!s.browsingShared)FilledTonalButton(onClick=newChat,enabled=!s.busy&&s.online,modifier=Modifier.testTag("newChat")){Text("＋ 新建")}}}
+        item{OutlinedTextField(value=s.chatSearch,onValueChange=vm::searchChats,label={Text("搜索聊天")},placeholder={Text(if(s.browsingShared)"聊天名称或手机名称" else if(s.approvalSettings.chatOnly)"聊天名称" else "聊天名称或项目路径")},singleLine=true,enabled=!s.busy,trailingIcon={if(s.chatSearch.isNotEmpty())TextButton(onClick={vm.searchChats("")}){Text("清空")}},modifier=Modifier.fillMaxWidth().testTag("chatSearch"))}
         if(searching)item{when{
             s.searching->Column(verticalArrangement=Arrangement.spacedBy(8.dp)){LinearProgressIndicator(Modifier.fillMaxWidth());Text("正在搜索可访问的聊天…",style=MaterialTheme.typography.bodySmall)}
             s.searchError!=null->Info("搜索未完成",s.searchError,"重试"){vm.searchChats(s.chatSearch)}
@@ -122,10 +123,10 @@ import org.json.JSONObject
         if(!s.online)item{Info("电脑后台尚未连接 Codex","请在电脑检查登录和网络，恢复后点击刷新。")}
         s.pending?.let{item{Info("有一条消息尚未确认","重试会沿用原消息编号，避免重复执行。","打开消息",vm::openPending)}}
         items(s.requests,key={"req:"+it.str("id")}){r->RequestBanner(r){request(r)}}
-        if(!searching&&s.chats.isEmpty())item{Card(Modifier.fillMaxWidth()){Column(Modifier.padding(24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){Text("从第一条任务开始",style=MaterialTheme.typography.titleMedium);Text(if(s.approvalSettings.chatOnly)"点击“新建”，开始本设备独立的聊天。" else "点击“新建”，或者刷新电脑上已有的聊天。",color=MaterialTheme.colorScheme.secondary)}}}
-        items(chats,key=Chat::id){chat->Card(onClick={vm.open(chat)},enabled=!s.busy,shape=RoundedCornerShape(20.dp),colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surface),modifier=Modifier.fillMaxWidth()){Row(Modifier.padding(18.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(8.dp)){Text(chat.name,fontWeight=FontWeight.SemiBold,maxLines=2,overflow=TextOverflow.Ellipsis);Text(folder(chat.cwd),style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.secondary)};Text("›",fontSize=26.sp,color=MaterialTheme.colorScheme.primary)}}}
+        if(!searching&&s.chats.isEmpty())item{Card(Modifier.fillMaxWidth()){Column(Modifier.padding(24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){Text(if(s.browsingShared)"暂无可查看的会话" else "从第一条任务开始",style=MaterialTheme.typography.titleMedium);Text(if(s.browsingShared)"其他已批准手机在仅聊天模式下创建会话后，可在这里刷新查看。" else if(s.approvalSettings.chatOnly)"点击“新建”，开始本设备独立的聊天。" else "点击“新建”，或者刷新电脑上已有的聊天。",color=MaterialTheme.colorScheme.secondary)}}}
+        items(chats,key=Chat::id){chat->Card(onClick={vm.open(chat)},enabled=!s.busy,shape=RoundedCornerShape(20.dp),colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surface),modifier=Modifier.fillMaxWidth()){Row(Modifier.padding(18.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(8.dp)){Text(chat.name,fontWeight=FontWeight.SemiBold,maxLines=2,overflow=TextOverflow.Ellipsis);Text(if(chat.sharedReadOnly)"只读 · "+chat.ownerLabel else folder(chat.cwd),style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.secondary)};Text("›",fontSize=26.sp,color=MaterialTheme.colorScheme.primary)}}}
         if(!searching&&s.chatCursor.isNotEmpty())item{TextButton(onClick=vm::moreChats,enabled=!s.busy,modifier=Modifier.fillMaxWidth()){Text("加载更多聊天")}}
-        item{Text(if(s.approvalSettings.chatOnly)"仅显示本设备独立的聊天；可联网和解题，不能读取文件或操作电脑。" else "已有聊天可直接刷新查看。继续发送时，如果桌面版仍占用它，应用会提示你先释放。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary,lineHeight=21.sp)}
+        item{Text(if(s.browsingShared)"查看其他已批准手机的仅聊天记录及图片；不能发送消息、停止任务或修改会话。点击刷新可更新记录。" else if(s.approvalSettings.chatOnly)"这里显示本设备独立的聊天；可联网和解题，不能读取文件或操作电脑。" else "已有聊天可直接刷新查看。继续发送时，如果桌面版仍占用它，应用会提示你先释放。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary,lineHeight=21.sp)}
     }
 }
 private fun folder(path:String)=path.trimEnd('\\','/').substringAfterLast('\\').substringAfterLast('/')
@@ -138,7 +139,7 @@ private fun folder(path:String)=path.trimEnd('\\','/').substringAfterLast('\\').
     LaunchedEffect(s.entries.size,s.entries.lastOrNull()?.text){if(follow){withFrameNanos{};if(list.layoutInfo.totalItemsCount>0)list.scrollToItem(list.layoutInfo.totalItemsCount-1)}}
     LazyColumn(state=list,modifier=Modifier.fillMaxSize(),contentPadding=PaddingValues(horizontal=16.dp,vertical=12.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
         if(s.historyCursor.isNotEmpty())item{TextButton(onClick=vm::moreHistory,enabled=!s.busy,modifier=Modifier.fillMaxWidth()){Text("加载更早的消息")}}
-        if(s.entries.isEmpty())item{Column(Modifier.fillMaxWidth().padding(vertical=44.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)){Text(">_",fontSize=36.sp,fontFamily=FontFamily.Monospace,color=MaterialTheme.colorScheme.primary);Text(if(s.approvalSettings.chatOnly)"想聊什么？" else "想让电脑做什么？",style=MaterialTheme.typography.titleLarge);Text("发一条消息，或附上一张图片。",color=MaterialTheme.colorScheme.secondary)}}
+        if(s.entries.isEmpty())item{Column(Modifier.fillMaxWidth().padding(vertical=44.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)){Text(">_",fontSize=36.sp,fontFamily=FontFamily.Monospace,color=MaterialTheme.colorScheme.primary);Text(if(s.selected?.sharedReadOnly==true)"这个会话还没有消息" else if(s.approvalSettings.chatOnly)"想聊什么？" else "想让电脑做什么？",style=MaterialTheme.typography.titleLarge);Text(if(s.selected?.sharedReadOnly==true)"对方发送消息后，刷新即可查看。" else "发一条消息，或附上一张图片。",color=MaterialTheme.colorScheme.secondary)}}
         items(s.entries,key=Entry::id){entry->Message(entry,vm){preview=it}}
         items(s.tasks.filter{it.active||it.state=="needsReview"||it.state=="failed"}.take(8),key={"job:"+it.id}){task->Surface(shape=RoundedCornerShape(14.dp),color=MaterialTheme.colorScheme.surfaceVariant){Row(Modifier.fillMaxWidth().padding(14.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(taskLabel(task.state),fontWeight=FontWeight.Medium);if(task.approvalsReviewer.isNotEmpty())Text("本任务审批："+approvalLabel(task.approvalsReviewer),style=MaterialTheme.typography.bodySmall);if(task.error.isNotBlank())Text(task.error,style=MaterialTheme.typography.bodySmall)};if(task.active)TextButton(onClick={vm.stop(task)},enabled=!s.busy){Text(if(task.state=="queued")"取消排队" else "停止")}}}}
         items(s.requests.filter{it.str("threadId")==s.selected?.id},key={"req:"+it.str("id")}){r->RequestBanner(r){request(r)}}
@@ -176,7 +177,7 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
 @Composable private fun NewChatDialog(s:ScreenState,dismiss:()->Unit,create:(String,String)->Unit){var name by rememberSaveable{mutableStateOf("")};var workspace by rememberSaveable(s.projectScope.revision,s.workspaces){mutableStateOf(s.workspaces.firstOrNull().orEmpty())}
     AlertDialog(onDismissRequest=dismiss,title={Text("新建聊天")},text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)){
         OutlinedTextField(name,{name=it.take(100)},label={Text("聊天名称")},modifier=Modifier.testTag("chatName"))
-        if(s.approvalSettings.chatOnly)Text("仅聊天（允许联网）\n此聊天仅对本设备可见，可发送文字和题目图片，不能操作电脑。")
+        if(s.approvalSettings.chatOnly)Text("仅聊天（允许联网）\n这是本设备的独立聊天，可发送文字和题目图片，不能操作电脑。")
         else{Text(if(s.projectScope.all)"项目范围：所有目录" else "选择电脑上的项目",style=MaterialTheme.typography.labelLarge);s.workspaces.forEach{path->Surface(onClick={workspace=path},color=if(path==workspace)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,shape=RoundedCornerShape(12.dp)){Column(Modifier.fillMaxWidth().padding(12.dp)){Text(folder(path),fontWeight=FontWeight.Medium);Text(path,style=MaterialTheme.typography.bodySmall)}}};if(s.projectScope.all)OutlinedTextField(workspace,{workspace=it.take(1000)},label={Text("项目完整路径")},modifier=Modifier.fillMaxWidth().testTag("workspacePath"))}
     }},confirmButton={TextButton(onClick={create(name,workspace.trim())},enabled=(s.approvalSettings.chatOnly||workspace.isNotBlank())&&s.online){Text("创建")}},dismissButton={TextButton(onClick=dismiss){Text("取消")}})
 }
@@ -198,6 +199,10 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
                 if(!s.approvalSettings.chatOnly){Text("退出电脑端并接管："+(if(s.takeoverAllowed)"已授权" else "未授权或后台不支持"),style=MaterialTheme.typography.bodySmall);Text("电脑设备管理中输入 T，可为本机单独授权。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)}
                 HorizontalDivider()
                 Text("本机登录连接",fontWeight=FontWeight.SemiBold)
+                if(s.sharedChatAccess.enabled){
+                    Text("查看其他手机仅聊天会话：已授权（只读）",style=MaterialTheme.typography.bodySmall)
+                    Text("由电脑设备管理中的 V 授权；只能看聊天和图片，不能代替对方操作。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)
+                }
                 s.devices.filter{it.isNull("revoked_at")}.forEach{device->
                     Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
                         val label=device.str("name")+(if(device.str("id")==s.session?.deviceId)"（本机）" else "")
@@ -207,7 +212,7 @@ private fun taskLabel(state:String)=when(state){"queued"->"消息已排队";"sta
                 }
                 Text("关闭手机应用不会停止电脑任务。重新打开后会自动连接，刷新即可查看结果。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.secondary)
                 TextButton(onClick=forget,enabled=!s.busy){Text("移除本机连接信息")}
-                Text("掌上 Codex · 0.9.0",style=MaterialTheme.typography.labelSmall)
+                Text("掌上 Codex · 0.9.1",style=MaterialTheme.typography.labelSmall)
             }
         },
         confirmButton={TextButton(onClick=dismiss){Text("完成")}}

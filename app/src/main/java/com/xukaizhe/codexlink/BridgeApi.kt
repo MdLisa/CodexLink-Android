@@ -18,7 +18,10 @@ import java.util.concurrent.TimeUnit
 fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNull { optJSONObject(it) }
 fun JSONObject.str(key: String, fallback: String = ""): String = if (isNull(key)) fallback else optString(key, fallback)
 data class Session(val address: String, val token: String, val deviceId: String, val clockOffset: Long = 0)
-data class Chat(val id: String, val name: String, val cwd: String, val control: String)
+data class Chat(val id: String, val name: String, val cwd: String, val control: String, val ownerName:String="",val ownerCode:String="") {
+    val sharedReadOnly get()=control=="sharedReadOnly"
+    val ownerLabel get()=listOf(ownerName.ifBlank{"其他手机"},ownerCode).filter{it.isNotBlank()}.joinToString(" · ")
+}
 data class ImageAttachment(val id: String, val mime: String = "", val available: Boolean = false)
 data class Entry(val id: String, val turnId: String, val role: String, val text: String, val detail: String = "", val live: Boolean = false, val images: List<ImageAttachment> = emptyList(),val files:List<FileAttachment> = emptyList())
 fun validImageId(id: String) = Regex("[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}").matches(id)
@@ -34,7 +37,7 @@ object BridgeCodec {
         require(url.username.isEmpty() && url.password.isEmpty() && url.query == null && url.fragment == null && url.encodedPath == "/") { "只填写电脑地址和端口，不要带路径、账号或参数。" }
         return url.toString().trimEnd('/')
     }
-    fun chat(j: JSONObject) = Chat(j.str("id"), j.str("name", "未命名聊天"), j.str("cwd"), j.str("control"))
+    fun chat(j: JSONObject) = Chat(j.str("id"), j.str("name", "未命名聊天"), j.str("cwd"), j.str("control"),j.optJSONObject("owner")?.str("name").orEmpty(),j.optJSONObject("owner")?.str("code").orEmpty())
     fun task(j: JSONObject) = Task(j.str("id"), j.str("threadId"), j.str("state"), j.str("turnId"), j.str("error"), j.str("approvalsReviewer"))
     fun item(turnId: String, j: JSONObject): Entry? {
         val key = "$turnId:${j.str("id")}"; val type = j.str("type")
@@ -69,9 +72,8 @@ class BridgeApi(val session: Session, val client: OkHttpClient = defaultClient()
     companion object {
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(40, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build()
     }
-    suspend fun image(id: String): ByteArray = withContext(Dispatchers.IO) {
-        require(validImageId(id)){"图片编号无效。"}
-        val path="/api/uploads/$id";val url=(session.address+path).toHttpUrl()
+    suspend fun image(id: String,sharedThreadId:String?=null): ByteArray = withContext(Dispatchers.IO) {
+        val path=chatImagePath(id,sharedThreadId);val url=(session.address+path).toHttpUrl()
         val builder=Request.Builder().url(url).header("Authorization","Bearer "+session.token)
         DeviceProof.create(identity,session.token,"GET",authority(url),url.encodedPath,ByteArray(0),clockOffset).forEach{(key,value)->builder.header(key,value)}
         client.newCall(builder.build()).execute().use{response->
