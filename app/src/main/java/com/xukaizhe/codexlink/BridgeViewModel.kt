@@ -25,6 +25,7 @@ data class ScreenState(
     val historyCursor: String = "", val workspaces: List<String> = emptyList(), val connection: String = "尚未连接",
     val projectScope: ProjectScope = ProjectScope(),
     val approvalSettings: ApprovalSettings = ApprovalSettings(),
+    val generatedFilesAllowed:Boolean=false,val generatedDownloadId:String="",val generatedProgress:Int=0,
     val sharedChatAccess:SharedChatAccess=SharedChatAccess(),val browsingShared:Boolean=false,
     val takeoverAvailable: Boolean = false, val takeoverAllowed: Boolean = false, val takeoverPlan: TakeoverPlan? = null, val takeoverProgress: String = "",
     val online: Boolean = false, val error: String? = null, val notice: String? = null,
@@ -39,7 +40,35 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     private var foreground=false;private var observer: Job?=null;private var socket: WebSocket?=null
     private var socketGeneration=0;private var lastSeq=0L;private var live=false;private var refreshJob: Job?=null
     private var searchJob: Job?=null;private var searchGeneration=0
+    private var documentDownloadJob:Job?=null
+    private var documentDownloader:GeneratedDocumentDownloader?=null
+    fun cancelDocumentDownload(){documentDownloader?.cancel();documentDownloadJob?.cancel();_state.update{it.copy(generatedDownloadId="",generatedProgress=0)}}
+    fun downloadGenerated(doc:GeneratedDocument,destination:Uri?=null,open:((File)->Unit)?=null){
+        if(documentDownloadJob?.isCompleted==false)return
+        val client=api?:return;val epoch=scopeEpoch;val selected=_state.value.selected?.id
+        documentDownloadJob=viewModelScope.launch {
+            val downloadJob=currentCoroutineContext()[Job]
+            var local:File?=null
+            try {
+                require(_state.value.generatedFilesAllowed&&!_state.value.approvalSettings.chatOnly&&_state.value.selected?.sharedReadOnly==false){"本机未获准下载生成文档。"}
+                require(_state.value.entries.any{entry->entry.generatedFiles.any{it.id==doc.id&&it==doc}}){"请在当前聊天中重新选择文档。"}
+                _state.update{it.copy(generatedDownloadId=doc.id,generatedProgress=0,error=null)}
+                val downloader=GeneratedDocumentDownloader(getApplication(),client);documentDownloader=downloader
+                val file=downloader.download(doc){progress->_state.update{it.copy(generatedProgress=progress)}};local=file
+                check(client===api&&epoch==scopeEpoch&&selected==_state.value.selected?.id&&_state.value.generatedFilesAllowed&&!_state.value.approvalSettings.chatOnly){"连接、聊天或下载权限已改变，请重新下载。"}
+                if(destination!=null){
+                    withContext(Dispatchers.IO){
+                        try{getApplication<Application>().contentResolver.openOutputStream(destination,"w")?.use{output->file.inputStream().use{input->val buffer=ByteArray(8192);while(true){ensureActive();val n=input.read(buffer);if(n<0)break;output.write(buffer,0,n)}}}?:error("无法写入所选位置。")}
+                        catch(e:Exception){runCatching{getApplication<Application>().contentResolver.delete(destination,null,null)};throw e}
+                    }
+                    _state.update{it.copy(notice="已保存到所选位置："+doc.name)};file.delete();local=null
+                }else{open?.invoke(file);local=null}
+            }catch(e:CancellationException){throw e}catch(e:Exception){failure(if(e is java.io.IOException&&e !is BridgeException)IllegalStateException("文档下载或保存失败，请检查网络、存储空间后重试。") else e)}
+            finally{local?.delete();if(documentDownloadJob===downloadJob){documentDownloader=null;documentDownloadJob=null;_state.update{it.copy(generatedDownloadId="",generatedProgress=0)}}}
+        }
+    }
     private var scopeEpoch=0
+    private val documentLock=Mutex()
     private val incomingLock=Mutex();private val documentDrafts=mutableMapOf<String,List<LocalDocument>>();private val externalReceipts=mutableSetOf<String>()
     private val drafts=mutableMapOf<String,Pair<String,List<Photo>>>()
     private val imageCache=object:LruCache<String,ByteArray>(16*1024*1024){override fun sizeOf(key:String,value:ByteArray)=value.size}
@@ -91,7 +120,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
         _state.update{ScreenState(loading=false,busy=true,session=session,loginAddress=normalized,pending=it.pending,incomingFiles=it.incomingFiles,importing=it.importing,notice="登录成功")};if(foreground)startObserving()
     }
     private suspend fun refreshQuiet(list:Boolean,history:Boolean=true){try{refresh(list,history)}catch(e:CancellationException){throw e}catch(e:Exception){if(e is BridgeException&&e.status==401)expired() else if(sharedFailure(e)){} else if(e is BridgeException&&e.code=="WORKSPACE_DENIED"){clearProjectViews();scheduleRefresh()} else _state.update{it.copy(connection="无法刷新，正在重试")}}}
-    private fun clearBrowseViews(shared:Boolean,notice:String?=null){scopeEpoch++;rememberDraft();cancelChatSearch();imageCache.evictAll();_state.update{it.copy(browsingShared=shared,chats=emptyList(),chatCursor="",selected=null,entries=emptyList(),tasks=emptyList(),requests=emptyList(),historyCursor="",chatSearch="",searchResults=emptyList(),searching=false,searchError=null,draft="",photos=emptyList(),files=emptyList(),takeoverPlan=null,notice=notice)}}
+    private fun clearBrowseViews(shared:Boolean,notice:String?=null){cancelDocumentDownload();scopeEpoch++;rememberDraft();cancelChatSearch();imageCache.evictAll();_state.update{it.copy(browsingShared=shared,chats=emptyList(),chatCursor="",selected=null,entries=emptyList(),tasks=emptyList(),requests=emptyList(),historyCursor="",chatSearch="",searchResults=emptyList(),searching=false,searchError=null,draft="",photos=emptyList(),files=emptyList(),takeoverPlan=null,notice=notice)}}
     private fun sharedFailure(e:Exception):Boolean {
         if(e !is BridgeException||!e.code.startsWith("SHARED_"))return false
         val denied=e.code=="SHARED_CHAT_DENIED"
@@ -101,10 +130,13 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     }
     fun browseShared(shared:Boolean)=action{require(!shared||_state.value.sharedChatAccess.enabled){"请先在电脑为本机授权只读查看。"};clearBrowseViews(shared);refresh(true)}
     private fun clearProjectViews(){clearBrowseViews(false,"权限范围已更新，请重新选择聊天。");_state.update{it.copy(online=false,workspaces=emptyList())}}
-    private fun clearModeViews(){clearProjectViews();drafts.clear();documentDrafts.clear();_state.update{it.copy(pending=null,notice="聊天模式已改变，草稿和本机重试记录已清除；已收到的任务不会重复发送。")};viewModelScope.launch{pendingLock.withLock{if(_state.value.pending==null)withContext(Dispatchers.IO){store.pending(null)}}}}
+    private fun clearModeViews(){clearProjectViews();drafts.clear();documentDrafts.clear();_state.update{it.copy(pending=null,notice="聊天模式已改变，草稿和本机重试记录已清除；已收到的任务不会重复发送。")};viewModelScope.launch{documentLock.withLock{withContext(Dispatchers.IO){store.clearDocumentDrafts()}};pendingLock.withLock{if(_state.value.pending==null)withContext(Dispatchers.IO){store.pending(null)}}}}
     private suspend fun refresh(list:Boolean,history:Boolean=true)=refreshLock.withLock {
         val client=api?:return@withLock;val initialEpoch=scopeEpoch;val status=client.request("/api/status")
         if(client!==api||initialEpoch!=scopeEpoch)return@withLock
+        val downloads=status.optJSONObject("generatedFiles")?.optBoolean("enabled")==true
+        if(!downloads){cancelDocumentDownload();_state.update{it.copy(entries=it.entries.map{entry->entry.copy(generatedFiles=emptyList())})}}
+        _state.update{it.copy(generatedFilesAllowed=downloads)}
         val scope=ProjectScope.fromStatus(status);val oldScope=_state.value.projectScope
         val settings=ApprovalSettings.fromStatus(status)
         val sharedAccess=SharedChatAccess.fromStatus(status);val previousAccess=_state.value.sharedChatAccess
@@ -170,8 +202,8 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     fun create(name:String,cwd:String,attachIncoming:Boolean=false)=action{require(!_state.value.browsingShared){"请先返回我的聊天。"};val body=JSONObject().put("name",name.ifBlank{"手机聊天"});if(!_state.value.approvalSettings.chatOnly)body.put("cwd",cwd);val result=api!!.request("/api/threads","POST",body);val chat=BridgeCodec.chat(result);_state.update{it.copy(chats=listOf(chat)+it.chats)};openInternal(chat);if(attachIncoming)attachIncomingInternal()}
     fun moreHistory()=action{val chat=_state.value.selected?:return@action;val cursor=_state.value.historyCursor;val epoch=scopeEpoch;val client=api?:return@action;if(cursor.isNotEmpty()){val result=client.request(chat.readPath()+"/history?limit=20&cursor="+encode(cursor));if(client===api&&epoch==scopeEpoch&&_state.value.selected?.id==chat.id)_state.update{it.copy(entries=(BridgeCodec.history(result)+it.entries).distinctBy(Entry::id),historyCursor=result.str("nextCursor"))}}}
     private fun documentKey(chatId:String)=api?.session?.address.orEmpty()+"|"+chatId
-    private suspend fun saveFiles(files:List<LocalDocument>){val chat=_state.value.selected?:return;requireOwnChat(chat);val key=documentKey(chat.id);documentDrafts[key]=files;withContext(Dispatchers.IO){store.documentDraft(key,files)};_state.update{it.copy(files=files)}}
-    fun addDocuments(uris:List<Uri>)=action{val s=_state.value;requireOwnChat(s.selected);require(!s.approvalSettings.chatOnly){"仅聊天模式只能添加图片。"};require(s.selected!=null){"请先选择聊天。"};require(s.files.size+s.photos.size+uris.size<=8){"一条消息最多添加 8 个附件。"};val files=withContext(Dispatchers.IO){uris.map{prepareDocument(getApplication(),it)}};saveFiles(s.files+files)}
+    private suspend fun saveFiles(files:List<LocalDocument>)=documentLock.withLock{val chat=_state.value.selected?:return@withLock;requireOwnChat(chat);val client=api;val epoch=scopeEpoch;val key=documentKey(chat.id);withContext(Dispatchers.IO){store.documentDraft(key,files)};check(client===api&&epoch==scopeEpoch&&_state.value.selected?.id==chat.id){"聊天或权限已改变，请重新选择文件。"};documentDrafts[key]=files;_state.update{it.copy(files=files)}}
+    fun addDocuments(uris:List<Uri>)=action{val s=_state.value;requireOwnChat(s.selected);require(s.selected!=null){"请先选择聊天。"};require(s.files.size+s.photos.size+uris.size<=8){"一条消息最多添加 8 个附件。"};val client=api;val epoch=scopeEpoch;val files=withContext(Dispatchers.IO){uris.map{prepareDocument(getApplication(),it)}};check(client===api&&epoch==scopeEpoch&&s.selected.id==_state.value.selected?.id){"聊天或权限已改变，请重新选择文件。"};saveFiles(s.files+files);uploadDraftFiles()}
     fun removeDocument(file:LocalDocument)=action{saveFiles(_state.value.files-file)}
     fun importExternal(uris:List<Uri>,receipt:String){viewModelScope.launch{ready.await();incomingLock.withLock{
         if(receipt in externalReceipts)return@withLock
@@ -183,7 +215,22 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     }}}
     fun discardIncoming()=action{incomingLock.withLock{withContext(Dispatchers.IO){store.incoming(emptyList())};_state.update{it.copy(incomingFiles=emptyList())}}}
     fun openForIncoming(chat:Chat)=action{requireOwnChat(chat);if(_state.value.browsingShared)clearBrowseViews(false);openInternal(chat);attachIncomingInternal()}
-    private suspend fun attachIncomingInternal()=incomingLock.withLock{val s=_state.value;require(!s.approvalSettings.chatOnly){"仅聊天模式请使用“＋图片”，不支持导入文件。"};require(s.photos.size+s.files.size+s.incomingFiles.size<=8){"目标聊天已有附件，合计不能超过 8 个。请移除部分附件或选择另一个对话。"};saveFiles(s.files+s.incomingFiles);withContext(Dispatchers.IO){store.incoming(emptyList())};_state.update{it.copy(incomingFiles=emptyList(),notice="文件已加入草稿，补充要求后点击发送")}}
+    private suspend fun attachIncomingInternal(){incomingLock.withLock{val s=_state.value;requireOwnChat(s.selected);require(s.photos.size+s.files.size+s.incomingFiles.size<=8){"目标聊天已有附件，合计不能超过 8 个。请移除部分附件或选择另一个对话。"};saveFiles(s.files+s.incomingFiles);withContext(Dispatchers.IO){store.incoming(emptyList())};_state.update{it.copy(incomingFiles=emptyList(),notice="文件已加入草稿，正在自动上传")}};uploadDraftFiles()}
+    fun retryDocumentUploads()=action{uploadDraftFiles()}
+    private suspend fun uploadDraftFiles(){
+        val client=api?:return;val initial=_state.value;val chat=initial.selected?:return;requireOwnChat(chat)
+        val epoch=scopeEpoch;val revision=initial.approvalSettings.modeRevision
+        val scope=documentUploadScope(client.session,initial.approvalSettings.executionMode,revision)
+        fun checkScope(){check(client===api&&epoch==scopeEpoch&&_state.value.selected?.id==chat.id&&_state.value.approvalSettings.modeRevision==revision){"连接、聊天或权限已改变，请重新选择文件。"};requireOwnChat(_state.value.selected)}
+        for(document in initial.files){
+            checkScope();if(document.uploadedScope==scope)continue
+            _state.update{it.copy(uploadProgress="正在上传："+document.name)}
+            val bytes=withContext(Dispatchers.IO){File(document.path).readBytes()};checkScope()
+            client.uploadDocument(document,bytes,progress={sent,total->_state.update{it.copy(uploadProgress="上传 "+document.name+" · "+(if(total>0)sent*100/total else 100)+"%")}},modeRevision=revision)
+            checkScope();saveFiles(_state.value.files.map{if(it.id==document.id)it.copy(uploadedScope=scope) else it});checkScope()
+        }
+        checkScope();_state.update{it.copy(uploadProgress="",notice="文件已上传，补充要求后点击发送")}
+    }
     fun draft(text:String){if(text.length<=64000)_state.update{it.copy(draft=text)}}
     fun removePhoto(photo:Photo){_state.update{it.copy(photos=it.photos-photo)}}
     fun addPhotos(uris:List<Uri>)=action{requireOwnChat(_state.value.selected);val count=8-_state.value.photos.size-_state.value.files.size;val photos=withContext(Dispatchers.IO){uris.take(count).map{preparePhoto(getApplication(),it)}};_state.update{it.copy(photos=it.photos+photos)}}
@@ -191,7 +238,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
     fun send()=action {
         val s=_state.value;val chat=s.selected?:return@action;val client=api?:return@action
         requireOwnChat(chat)
-        val mode=if(s.approvalSettings.chatOnly)"chat_only" else "operate";require(!s.approvalSettings.chatOnly||s.files.isEmpty()){"仅聊天不支持文件附件，请移除后使用图片。"}
+        val mode=if(s.approvalSettings.chatOnly)"chat_only" else "operate"
         val pending=s.pending?:run{require(s.draft.isNotBlank()||s.photos.isNotEmpty()||s.files.isNotEmpty()){"请输入文字或选择图片。"};val created=Pending(UUID.randomUUID().toString(),client.session.address,chat.id,s.draft,s.photos.map(Photo::path),files=s.files,executionMode=mode,modeRevision=s.approvalSettings.modeRevision);persist(created);created}
         require(s.approvalSettings.acceptsPending(pending)){"这条未确认消息属于另一聊天模式，请刷新检查。"}
         require(pending.address==client.session.address&&pending.threadId==chat.id){"还有一条未确认的消息，请先打开它所属的聊天重试，或刷新检查结果。"}
@@ -237,6 +284,7 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
             if(_state.value.browsingShared)clearBrowseViews(access.enabled,"查看权限已更新，请重新选择会话。")
             _state.update{it.copy(sharedChatAccess=access)};scheduleRefresh();return
         }
+        if(type=="generated-files.settings.changed"){cancelDocumentDownload();_state.update{it.copy(generatedFilesAllowed=data.optBoolean("enabled"),entries=it.entries.map{entry->entry.copy(generatedFiles=emptyList())})};scheduleRefresh();return}
         if(type=="settings.changed"){val next=ApprovalSettings(data.str("approvalsReviewer"),true,data.str("modeRevision"));if(data.optBoolean("modeChanged")||next.chatOnly!=_state.value.approvalSettings.chatOnly)clearModeViews();_state.update{it.copy(approvalSettings=next)};scheduleRefresh();return}
         if(type=="takeover.settings.changed"){_state.update{it.copy(takeoverAllowed=data.optBoolean("enabled"),takeoverPlan=if(data.optBoolean("enabled"))it.takeoverPlan else null)};scheduleRefresh();return}
         val seq=e.optLong("seq");if(seq<=lastSeq)return;lastSeq=seq
@@ -258,6 +306,6 @@ class BridgeViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
     }
-    override fun onCleared(){stopObserving();api?.client?.dispatcher?.executorService?.shutdown();super.onCleared()}
+    override fun onCleared(){cancelDocumentDownload();stopObserving();api?.client?.dispatcher?.executorService?.shutdown();super.onCleared()}
     private fun encode(s:String)=java.net.URLEncoder.encode(s,"UTF-8")
 }

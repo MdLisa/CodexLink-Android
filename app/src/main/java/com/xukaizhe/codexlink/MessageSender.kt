@@ -17,8 +17,9 @@ class MessageSender(private val api: BridgeApi) {
         }
         while(pending.uploadedFiles.size<pending.files.size){
             val document=pending.files[pending.uploadedFiles.size];var last=-1
+            if(document.uploadedScope==documentUploadScope(api.session,pending.executionMode,pending.modeRevision)){pending=pending.copy(uploadedFiles=pending.uploadedFiles+document.id);persist(pending);continue}
             progress("正在上传："+document.name)
-            val upload=api.uploadDocument(document,read(document.path)){sent,total->val percent=if(total>0)((sent*100)/total).toInt() else 100;if(percent!=last){last=percent;progress("上传 "+document.name+" · "+percent+"%")}}
+            val upload=api.uploadDocument(document,read(document.path),progress={sent,total->val percent=if(total>0)((sent*100)/total).toInt() else 100;if(percent!=last){last=percent;progress("上传 "+document.name+" · "+percent+"%")}},modeRevision=pending.modeRevision)
             pending=pending.copy(uploadedFiles=pending.uploadedFiles+upload.getString("id"));persist(pending)
         }
         progress("正在发送消息…")

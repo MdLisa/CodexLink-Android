@@ -9,9 +9,9 @@ import java.io.File
 import java.util.UUID
 
 const val DOCUMENT_LIMIT=10L*1024*1024
-data class LocalDocument(val id:String,val name:String,val mime:String,val path:String,val size:Long){
-    fun json()=JSONObject().put("id",id).put("name",name).put("mime",mime).put("path",path).put("size",size)
-    companion object{fun from(j:JSONObject)=LocalDocument(j.str("id"),j.str("name"),j.str("mime"),j.str("path"),j.optLong("size"))}
+data class LocalDocument(val id:String,val name:String,val mime:String,val path:String,val size:Long,val uploadedScope:String=""){
+    fun json()=JSONObject().put("id",id).put("name",name).put("mime",mime).put("path",path).put("size",size).put("uploadedScope",uploadedScope)
+    companion object{fun from(j:JSONObject)=LocalDocument(j.str("id"),j.str("name"),j.str("mime"),j.str("path"),j.optLong("size"),j.str("uploadedScope"))}
 }
 data class FileAttachment(val id:String,val name:String,val size:Long,val available:Boolean)
 fun fileSize(size:Long):String=when{size<1024->"$size B";size<1024*1024->"%.1f KB".format(size/1024.0);else->"%.1f MB".format(size/(1024.0*1024))}
@@ -43,3 +43,5 @@ fun prepareDocument(context:Context,uri:Uri):LocalDocument {
         return LocalDocument(id,name,mime,target.absolutePath,total)
     }catch(e:Exception){target.delete();throw e}
 }
+
+fun documentUploadScope(session:Session,mode:String,revision:String)=session.address+"|"+session.deviceId+"|"+mode+"|"+revision

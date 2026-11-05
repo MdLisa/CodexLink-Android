@@ -23,7 +23,7 @@ data class Chat(val id: String, val name: String, val cwd: String, val control: 
     val ownerLabel get()=listOf(ownerName.ifBlank{"其他手机"},ownerCode).filter{it.isNotBlank()}.joinToString(" · ")
 }
 data class ImageAttachment(val id: String, val mime: String = "", val available: Boolean = false)
-data class Entry(val id: String, val turnId: String, val role: String, val text: String, val detail: String = "", val live: Boolean = false, val images: List<ImageAttachment> = emptyList(),val files:List<FileAttachment> = emptyList(),val startedAtMs:Long?=null,val completedAtMs:Long?=null)
+data class Entry(val id: String, val turnId: String, val role: String, val text: String, val detail: String = "", val live: Boolean = false, val images: List<ImageAttachment> = emptyList(),val files:List<FileAttachment> = emptyList(),val startedAtMs:Long?=null,val completedAtMs:Long?=null,val generatedFiles:List<GeneratedDocument> = emptyList())
 fun validImageId(id: String) = Regex("[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}").matches(id)
 data class Task(val id: String, val threadId: String, val state: String, val turnId: String, val error: String, val approvalsReviewer: String = "") {
     val active get() = state in setOf("queued", "starting", "running", "waitingApproval")
@@ -57,7 +57,7 @@ object BridgeCodec {
             "webSearch" -> Entry(key, turnId, "tool", "联网搜索", j.str("query"))
             else -> null
         }
-        return entry?.copy(startedAtMs=j.messageMillis("startedAtMs"),completedAtMs=j.messageMillis("completedAtMs"))
+        return entry?.copy(generatedFiles=if(type=="agentMessage")j.optJSONArray("generatedFiles")?.objects().orEmpty().map(GeneratedDocument::from) else emptyList(),startedAtMs=j.messageMillis("startedAtMs"),completedAtMs=j.messageMillis("completedAtMs"))
     }
     fun history(j: JSONObject): List<Entry> = j.optJSONArray("turns")?.objects().orEmpty().asReversed().flatMap { turn -> turn.optJSONArray("items")?.objects().orEmpty().mapNotNull { item(turn.str("id"), it) } }
 }
@@ -72,6 +72,13 @@ class BridgeApi(val session: Session, val client: OkHttpClient = defaultClient()
     }
     companion object {
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(40, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build()
+    }
+    internal fun generatedDownloadRequest(id:String):Request {
+        require(validImageId(id)){"文档编号无效。"}
+        val path="/api/generated-files/$id";val url=(session.address+path).toHttpUrl()
+        val builder=Request.Builder().url(url).header("Authorization","Bearer "+session.token)
+        DeviceProof.create(identity,session.token,"GET",authority(url),path,ByteArray(0),clockOffset).forEach{(k,v)->builder.header(k,v)}
+        return builder.build()
     }
     suspend fun image(id: String,sharedThreadId:String?=null): ByteArray = withContext(Dispatchers.IO) {
         val path=chatImagePath(id,sharedThreadId);val url=(session.address+path).toHttpUrl()
@@ -118,9 +125,9 @@ class BridgeApi(val session: Session, val client: OkHttpClient = defaultClient()
             json
         }
     }
-    suspend fun uploadDocument(file:LocalDocument,bytes:ByteArray,progress:((Long,Long)->Unit)?=null):JSONObject {
+    suspend fun uploadDocument(file:LocalDocument,bytes:ByteArray,progress:((Long,Long)->Unit)?=null,modeRevision:String=""):JSONObject {
         require(validImageId(file.id)&&bytes.size.toLong()==file.size&&file.size<=DOCUMENT_LIMIT){"附件内容已改变或超过 10 MB，请重新选择。"}
-        val url=session.address.toHttpUrl().newBuilder().addPathSegment("api").addPathSegment("files").addQueryParameter("id",file.id).addQueryParameter("name",file.name).addQueryParameter("mime",file.mime).build()
+        val url=session.address.toHttpUrl().newBuilder().addPathSegment("api").addPathSegment("files").addQueryParameter("id",file.id).addQueryParameter("name",file.name).addQueryParameter("mime",file.mime).apply{if(modeRevision.isNotEmpty())addQueryParameter("modeRevision",modeRevision)}.build()
         return request(url.encodedPath+"?"+url.encodedQuery,"POST",bytes=bytes,uploadProgress=progress)
     }
     fun socket(after: Long, event: (JSONObject) -> Unit, ended: (Int) -> Unit): WebSocket {

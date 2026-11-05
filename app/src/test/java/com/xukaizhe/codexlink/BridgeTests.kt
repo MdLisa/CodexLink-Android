@@ -155,6 +155,26 @@ class BridgeTests {
             assertEquals(1,server.requestCount);assertEquals("/api/threads/t/messages",server.takeRequest().requestUrl!!.encodedPath);assertNull(pending)
         }
     }
+    @Test fun preuploadedChatOnlyDraftSendsWithoutUploadingAgain()=runBlocking {
+        MockWebServer().use{server->
+            val api=client(server);val scope=documentUploadScope(api.session,"chat_only","r1")
+            val document=LocalDocument("12345678-1234-1234-1234-123456789abc","笔记.txt","text/plain","private.txt",3,scope)
+            val restored=LocalDocument.from(JSONObject(document.json().toString()));assertEquals(document,restored)
+            server.enqueue(MockResponse().setResponseCode(202).setBody("{}"))
+            MessageSender(api).send(Pending("pre-uploaded-message",api.session.address,"t","总结",emptyList(),files=listOf(restored),executionMode="chat_only",modeRevision="r1"),{},{error("Already uploaded")})
+            assertEquals(1,server.requestCount);val request=server.takeRequest();assertEquals("/api/threads/t/messages",request.path)
+            val body=JSONObject(request.body.readUtf8());assertEquals("r1",body.getString("modeRevision"));assertEquals(document.id,body.getJSONArray("fileIds").getString(0))
+        }
+    }
+    @Test fun oldModeRevisionNeverReusesDraftUploadMarker()=runBlocking {
+        MockWebServer().use{server->
+            val api=client(server);val id="12345678-1234-1234-1234-123456789abc"
+            val document=LocalDocument(id,"notes.txt","text/plain","private.txt",3,documentUploadScope(api.session,"chat_only","old"))
+            server.enqueue(MockResponse().setResponseCode(409).setBody("""{"error":{"code":"MODE_CHANGED","message":"Changed"}}"""))
+            try{MessageSender(api).send(Pending("stale-upload-message",api.session.address,"t","read",emptyList(),files=listOf(document),executionMode="chat_only",modeRevision="new"),{},{byteArrayOf(1,2,3)});fail()}catch(e:BridgeException){assertEquals(409,e.status)}
+            val request=server.takeRequest();assertEquals("/api/files",request.requestUrl!!.encodedPath);assertEquals("new",request.requestUrl!!.queryParameter("modeRevision"));assertEquals(1,server.requestCount)
+        }
+    }
     @Test fun fileCardsArePreservedInHistoryWithoutInventingImageAttachments(){
         val entry=BridgeCodec.item("t",JSONObject("""{"id":"u","type":"userMessage","content":[{"type":"text","text":"read"}],"files":[{"id":"f","name":"report.pdf","size":42,"available":true}]}"""))!!
         assertEquals("read",entry.text);assertTrue(entry.images.isEmpty());assertEquals("report.pdf",entry.files.single().name);assertTrue(entry.files.single().available)

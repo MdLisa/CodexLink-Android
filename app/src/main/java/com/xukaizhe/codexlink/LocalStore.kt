@@ -51,6 +51,7 @@ class LocalStore(context: Context) {
     @Synchronized fun lastChat(id: String) { write(root().put("lastChat",id)) }
     @Synchronized fun incoming(files:List<LocalDocument>,receipt:String?=null){val j=root();j.put("incoming",JSONArray(files.map{it.json()}));if(receipt!=null)j.put("externalReceipts",JSONArray((j.optJSONArray("externalReceipts").strings()+receipt).takeLast(64)));write(j)}
     @Synchronized fun documentDraft(key:String,files:List<LocalDocument>){val j=root();val drafts=j.optJSONObject("documentDrafts")?:JSONObject();if(files.isEmpty())drafts.remove(key) else drafts.put(key,JSONArray(files.map{it.json()}));j.put("documentDrafts",drafts);write(j)}
+    @Synchronized fun clearDocumentDrafts(){val j=root();j.remove("documentDrafts");write(j)}
     @Synchronized fun forgetConnection(){val old=root();val j=JSONObject();for(key in listOf("incoming","externalReceipts"))if(old.has(key))j.put(key,old.get(key));write(j)}
     @Synchronized fun clear() { check(prefs.edit().clear().commit()) { "无法清除本机连接信息，请检查手机存储空间。" } }
 }
