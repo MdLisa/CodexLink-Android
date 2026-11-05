@@ -13,8 +13,8 @@ android {
         applicationId = "com.xukaizhe.codexlink"
         minSdk = 26
         targetSdk = 37
-        versionCode = 17
-        versionName = "0.10.1"
+        versionCode = 19
+        versionName = "0.10.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

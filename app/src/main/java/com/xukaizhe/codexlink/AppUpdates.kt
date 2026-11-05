@@ -54,13 +54,14 @@ internal class UpdateRepository(private val context:Context,private val client:O
         val bytes=body.byteStream().use{it.readBytesLimited(32768)}
         AndroidRelease.parse(JSONObject(bytes.toString(Charsets.UTF_8)))
     }
-    fun installed():PackageInfo=context.packageManager.getPackageInfo(context.packageName,signatureFlags())
+    fun installed():PackageInfo=readUpdatePackageInfo{flags->context.packageManager.getPackageInfo(context.packageName,flags)}?:error("无法读取当前应用信息。")
     fun installedVersion():Long=installed().code()
     fun download(release:AndroidRelease,progress:(Int)->Unit):File {
         val target=File(dir,release.sha256+".apk")
         if(target.isFile&&runCatching{verify(target,release)}.isSuccess)return target
         dir.listFiles()?.filter{it.isFile}?.forEach{it.delete()}
-        val partial=File(dir,"download.part")
+        // Keep the APK extension for package managers which depend on the filename when parsing.
+        val partial=File(dir,"download.apk")
         try {
             response(release.url).use{r->
                 require(r.code==200){"下载失败，请稍后重试。"};val body=requireNotNull(r.body)
@@ -78,23 +79,24 @@ internal class UpdateRepository(private val context:Context,private val client:O
         require(file.isFile&&file.length()==release.size){"更新文件已失效，请重新下载。"}
         val digest=MessageDigest.getInstance("SHA-256");file.inputStream().use{input->val buffer=ByteArray(64*1024);while(true){val n=input.read(buffer);if(n<0)break;digest.update(buffer,0,n)}}
         require(digest.digest().hex()==release.sha256){"安装包校验失败，请重新下载。"}
-        val archive=context.packageManager.getPackageArchiveInfo(file.absolutePath,signatureFlags())?:error("无法读取安装包。")
-        validateIdentity(archive.packageName,archive.code(),archive.versionName,signers(archive),context.packageName,installedVersion(),signers(installed()),release)
+        val archive=readUpdatePackageInfo{flags->context.packageManager.getPackageArchiveInfo(file.absolutePath,flags)}?:error("无法读取安装包。")
+        val current=installed()
+        validateIdentity(archive.packageName,archive.code(),archive.versionName,updateSigners(archive),context.packageName,current.code(),updateSigners(current),release)
         require((archive.applicationInfo?.minSdkVersion?:Int.MAX_VALUE)<=Build.VERSION.SDK_INT){"新版不支持当前安卓系统。"}
     }
     fun installIntent(file:File):Intent {
         val uri=FileProvider.getUriForFile(context,context.packageName+".updates",file)
         return Intent(Intent.ACTION_VIEW).setDataAndType(uri,"application/vnd.android.package-archive").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).apply{clipData=android.content.ClipData.newRawUri("应用更新",uri)}
     }
-    @Suppress("DEPRECATION") private fun signatureFlags()=if(Build.VERSION.SDK_INT>=28)PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
-    @Suppress("DEPRECATION") private fun signers(info:PackageInfo):Set<String> = (if(Build.VERSION.SDK_INT>=28)info.signingInfo?.apkContentsSigners else info.signatures).orEmpty().map{MessageDigest.getInstance("SHA-256").digest(it.toByteArray()).hex()}.toSet()
 }
 @Suppress("DEPRECATION") private fun PackageInfo.code():Long=if(Build.VERSION.SDK_INT>=28)longVersionCode else versionCode.toLong()
 private fun ByteArray.hex()=joinToString(""){"%02x".format(it.toInt() and 255)}
 private fun java.io.InputStream.readBytesLimited(limit:Int):ByteArray {val out=java.io.ByteArrayOutputStream();val buffer=ByteArray(4096);while(true){val n=read(buffer);if(n<0)break;require(out.size()+n<=limit){"更新信息过大。"};out.write(buffer,0,n)};return out.toByteArray()}
 internal fun validateIdentity(pkg:String,code:Long,name:String?,signers:Set<String>,installedPkg:String,installedCode:Long,installedSigners:Set<String>,release:AndroidRelease){
     require(pkg==installedPkg&&code==release.versionCode&&code>installedCode&&name==release.versionName){"安装包应用或版本不匹配。"}
-    require(signers.isNotEmpty()&&signers==installedSigners){"安装包签名不一致，已停止更新。"}
+    require(installedSigners.isNotEmpty()){"无法读取当前应用的签名，已停止更新。请保留应用，使用原发布APK覆盖安装。"}
+    require(signers.isNotEmpty()){"无法读取新版安装包的签名，已停止更新。请保留应用，使用原发布APK覆盖安装。"}
+    require(signers==installedSigners){"安装包签名不一致，已停止更新。\n当前：${installedSigners.sorted().joinToString { it.take(16) }}\n新版：${signers.sorted().joinToString { it.take(16) }}"}
 }
 
 internal data class AppUpdateState(val visible:Boolean=false,val stage:String="idle",val release:AndroidRelease?=null,val progress:Int=0,val message:String="",val file:File?=null)

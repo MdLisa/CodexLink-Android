@@ -1,6 +1,9 @@
 package com.xukaizhe.codexlink
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import android.content.pm.Signature
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -10,6 +13,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -26,6 +30,15 @@ class AppUpdatesTest {
         fun check(p:String=pkg,code:Long=16,name:String="0.10.0",signers:Set<String> = signer,installed:Long=15)=validateIdentity(p,code,name,signers,pkg,installed,signer,release)
         check();reject{check(p="another.app")};reject{check(code=17)};reject{check(name="0.9.2")};reject{check(signers=setOf("other"))};reject{check(signers=emptySet())};reject{check(installed=16)};reject{check(installed=17)}
     }
+    @Test fun missingCertificateInformationIsNotReportedAsAMismatchedCertificate(){
+        val release=AndroidRelease.parse(manifest());val pkg="com.xukaizhe.codexlink"
+        fun message(next:Set<String>,old:Set<String>):String?=try{validateIdentity(pkg,16,"0.10.0",next,pkg,15,old,release);null}catch(e:IllegalArgumentException){e.message}
+        assertTrue(message(setOf("trusted"),emptySet())!!.contains("无法读取当前应用的签名"))
+        assertTrue(message(emptySet(),setOf("trusted"))!!.contains("无法读取新版安装包的签名"))
+        assertTrue(message(setOf("other"),setOf("trusted"))!!.contains("签名不一致"))
+        assertNull(message(setOf("trusted"),setOf("trusted")))
+        assertTrue(message(setOf("trusted","extra"),setOf("trusted"))!!.contains("签名不一致"))
+    }
     private fun withServer(block:(MockWebServer,UpdateRepository,Context)->Unit){
         val server=MockWebServer();server.start()
         val context:Context=RuntimeEnvironment.getApplication()
@@ -39,6 +52,33 @@ class AppUpdatesTest {
         server.enqueue(MockResponse().setResponseCode(302).addHeader("Location","https://evil.test/update"));reject{repo.latest()}
         server.enqueue(MockResponse().setBody("x".repeat(32769)));reject{repo.latest()}
         server.enqueue(MockResponse().setChunkedBody("x".repeat(32769),4096));reject{repo.latest()}
+    }
+    @Suppress("DEPRECATION")
+    @Test fun legacyOnlyCertificatesAllowVerifiedDownloadUsingAnApkFilename()=withServer{server,repo,context->
+        val body="test apk payload";val bytes=body.toByteArray();val sha=java.security.MessageDigest.getInstance("SHA-256").digest(bytes).hexDigest()
+        val release=AndroidRelease.parse(manifest()).copy(size=bytes.size.toLong(),sha256=sha,url=UPDATE_BASE+"CodexLink-0.10.0-16-${sha.take(16)}.apk")
+        fun info(code:Int,name:String)=PackageInfo().apply{
+            packageName=context.packageName;versionCode=code;versionName=name
+            applicationInfo=ApplicationInfo(context.applicationInfo).apply{minSdkVersion=26}
+            signatures=arrayOf(Signature("same-certificate".toByteArray()))
+        }
+        val manager=shadowOf(context.packageManager)
+        manager.installPackage(info(15,"0.9.2"))
+        val dir=java.io.File(context.cacheDir,"app_updates").apply{mkdirs()}
+        manager.setPackageArchiveInfo(java.io.File(dir,"download.apk").absolutePath,info(16,"0.10.0"))
+        val target=java.io.File(dir,"$sha.apk")
+        manager.setPackageArchiveInfo(target.absolutePath,info(16,"0.10.0"))
+        server.enqueue(MockResponse().setBody(body))
+        try{
+            assertEquals(target,repo.download(release){})
+            assertArrayEquals(bytes,target.readBytes())
+            assertFalse(java.io.File(dir,"download.apk").exists())
+            repo.verify(target,release)
+            assertEquals(target,repo.download(release){}) // Reuses the verified cache, no second HTTP call.
+            assertEquals(1,server.requestCount)
+            manager.setPackageArchiveInfo(target.absolutePath,info(16,"0.10.0").apply{signatures=arrayOf(Signature("different-certificate".toByteArray()))})
+            reject{repo.verify(target,release)}
+        }finally{target.delete()}
     }
     @Test fun incompleteOversizedOrCorruptDownloadsNeverLeaveAnInstallableFile()=withServer{server,repo,context->
         val release=AndroidRelease.parse(manifest())

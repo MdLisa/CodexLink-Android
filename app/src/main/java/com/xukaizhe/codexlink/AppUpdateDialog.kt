@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -35,7 +36,7 @@ import androidx.compose.ui.unit.dp
                 "verifying"->{LinearProgressIndicator(Modifier.fillMaxWidth());Text("正在校验安装包…")}
                 "ready"->Text("已下载并校验，点击后由系统确认安装。首次可能需要允许本应用安装更新。")
             }
-            if(state.message.isNotBlank())Text(state.message)
+            if(state.message.isNotBlank())SelectionContainer{Text(state.message)}
         }
     },confirmButton={
         if(!busy)TextButton(onClick={
